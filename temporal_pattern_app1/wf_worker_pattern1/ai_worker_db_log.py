@@ -92,13 +92,15 @@ def upsert_workflow_instance(
     workflow_id: str,
     workflow_type: str,
     status: str,
+    input_data: Optional[dict] = None,
+    document_id: Optional[str] = None,
     requires_manual_review: Optional[bool] = False,
     end_time: Optional[datetime] = None,
     domain: Optional[str] = None,
     parent_workflow: Optional[str] = None,
     workflow_group: Optional[str] = None
 ):
-    """Insert or update a workflow instance record"""
+    """Insert or update a workflow instance record with input_data and document_id"""
     if end_time is None and status in ("COMPLETED", "FAILED"):
         end_time = datetime.utcnow()    
 
@@ -106,10 +108,13 @@ def upsert_workflow_instance(
         query = """
         INSERT INTO workflow_instance(
             workflow_id, workflow_type, status,
+            input_data, document_id,
             requires_manual_review, end_time, domain, parent_workflow, workflow_group
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (workflow_id) DO UPDATE
         SET status = EXCLUDED.status,
+            input_data = EXCLUDED.input_data,
+            document_id = EXCLUDED.document_id,
             requires_manual_review = EXCLUDED.requires_manual_review,
             end_time = EXCLUDED.end_time,
             domain = EXCLUDED.domain,
@@ -118,9 +123,16 @@ def upsert_workflow_instance(
             updated_at = NOW()
         """
         values = (
-            workflow_id, workflow_type, status,
-            requires_manual_review, end_time,
-            domain, parent_workflow, workflow_group
+            workflow_id,
+            workflow_type,
+            status,
+            json.dumps(input_data) if input_data else None,
+            document_id,
+            requires_manual_review,
+            end_time,
+            domain,
+            parent_workflow,
+            workflow_group
         )
         with pool.connection() as conn:
             with conn.cursor() as cur:

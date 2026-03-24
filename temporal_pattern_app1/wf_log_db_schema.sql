@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS workflow_instance (
     workflow_id TEXT PRIMARY KEY,
     workflow_type TEXT NOT NULL,
     status TEXT,
+    input_data JSONB,
     domain TEXT,
+    document_id TEXT,
     parent_workflow TEXT,
     workflow_group TEXT,
     requires_manual_review BOOLEAN DEFAULT FALSE,
@@ -116,3 +118,9 @@ CREATE TABLE IF NOT EXISTS erp_crm_documents (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- =========================================================
+drop table workflow_instance cascade;
+drop table workflow_activity_log cascade;
+drop table workflow_approval_task cascade;
+drop table workflow_ocr_data;
+drop table erp_crm_documents;

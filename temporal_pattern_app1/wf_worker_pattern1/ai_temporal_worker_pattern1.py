@@ -22,7 +22,7 @@ with workflow.unsafe.imports_passed_through():
         log_approval_signal
     )
 
-TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
+TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "host.docker.internal:7233")
 # TEMPORAL_HOST = "localhost:7233"
 # TEMPORAL_HOST = "temporal-server-demo.australiaeast.cloudapp.azure.com:7233"
 
@@ -216,15 +216,22 @@ class HybridEnterpriseSTPWorkflow:
         def log(step,data): audit.append({"step":step,"time":workflow.now().isoformat(),"payload":data})
 
         print(f"🚀 [WORKFLOW START] Workflow ID: {wf_id}, starting processing...")
+        # Extract document_id if already present in payload
+        document_id = payload.get("document_url")
+
+        # Log workflow start with input_data and document_id
         upsert_workflow_instance(
             workflow_id=wf_id,
             workflow_type="HybridEnterpriseSTPWorkflow",
             status="STARTED",
-            domain=None,             # optional
-            parent_workflow=None,    # optional
-            workflow_group=None,     # optional
+            input_data=initial_payload,
+            document_id=document_id,
+            domain=None,
+            parent_workflow=None,
+            workflow_group=None,
             requires_manual_review=False
         )
+
         # 1️⃣ OCR
         res = await workflow.execute_activity(ai_process_doc, ActivityInput(payload, context),
             start_to_close_timeout=timedelta(seconds=120), retry_policy=retry)
@@ -272,17 +279,14 @@ class HybridEnterpriseSTPWorkflow:
             start_to_close_timeout=timedelta(seconds=30), retry_policy=retry)
 
         print(f"🏁 [WORKFLOW COMPLETED] Workflow {wf_id} finished with decision: {decision}")
-        # After last activity / signal
-        requires_manual_review = (decision=="manual_review")
-
+        # Mark workflow as completed
         upsert_workflow_instance(
             workflow_id=wf_id,
             workflow_type="HybridEnterpriseSTPWorkflow",
             status="COMPLETED",
-            domain=None,
-            parent_workflow=None,
-            workflow_group=None,
-            requires_manual_review=requires_manual_review
+            input_data=initial_payload,
+            document_id=document_id,
+            requires_manual_review=(decision == "manual_review")
         )
         return {"status":"COMPLETED","decision":decision,"erp_doc_id":payload.get("erp_doc_id"),"audit":audit}
 
