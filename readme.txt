@@ -1,9 +1,9 @@
 
-docker compose -f docker-compose-image-postgres.yml up -d
+docker-compose -f docker-compose-image-postgres.yml up -d
 
 docker logs -f temporal-admin-tools      # watch real-time DB setup logs
 docker logs -f temporal-create-namespace # watch namespace setup logs
-docker compose -f docker-compose-image-postgres.yml down -v
+docker-compose -f docker-compose-image-postgres.yml down -v
 
 How you access Temporal from your local machine
 🔹 1. Temporal Web UI (browser) - Temporal frontend service runs on: port 7233
@@ -31,20 +31,23 @@ az vm open-port --resource-group 1-ai-llm-rg --name temporal-server-vm --port "*
 # SSH into VM
 ssh azureuser@temporal-server-demo.australiaeast.cloudapp.azure.com
 
+ssh -o StrictHostKeyChecking=no azureuser@temporal-server-demo.australiaeast.cloudapp.azure.com
+
 # Install Docker + Compose
 sudo apt update
 sudo apt install -y docker.io docker-compose
+sudo apt install python3-pip
 sudo usermod -aG docker $USER
 newgrp docker
 
 git clone https://github.com/gohils/temporal1-repo.git
-cd server_temporal_linux
+cd temporal1-repo/server_temporal_linux
 
-docker compose -f docker-compose-image-postgres up -d
+docker-compose -f docker-compose-image-postgres up -d
 
 cd ..
 cd temporal_pattern_app1
-docker compose -f docker-compose-worker-pattern1.yml up -d
+docker-compose -f docker-compose-worker-pattern1.yml up -d
 fastapi endpoint -
 http://temporal-server-demo.australiaeast.cloudapp.azure.com:8000
 

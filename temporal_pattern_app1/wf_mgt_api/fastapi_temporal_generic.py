@@ -26,9 +26,9 @@ class WorkflowStartRequest(BaseModel):
     task_queue: str = DEFAULT_TASK_QUEUE
 
 class WorkflowSignalRequest(BaseModel):
-    workflow_id: str
-    signal_name: str
-    signal_input: Dict[str, Any] = {}
+    workflow_id: str = "AI_DOC_Workflow-xxxxxxxx"
+    signal_name: str = "manual_approval"
+    signal_input: Dict[str, Any] = {"decision": "APPROVED", "user_id": "manager_001", "comments": "Document verified, ready to onboard"}
     task_queue: str = DEFAULT_TASK_QUEUE
 
 
