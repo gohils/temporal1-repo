@@ -37,4 +37,22 @@ sudo apt install -y docker.io docker-compose
 sudo usermod -aG docker $USER
 newgrp docker
 
-docker compose -f docker-compose-postgres.yml up -d
+git clone https://github.com/gohils/temporal1-repo.git
+cd server_temporal_linux
+
+docker compose -f docker-compose-image-postgres up -d
+
+cd ..
+cd temporal_pattern_app1
+docker compose -f docker-compose-worker-pattern1.yml up -d
+fastapi endpoint -
+http://temporal-server-demo.australiaeast.cloudapp.azure.com:8000
+
+# Verify containers are running
+docker ps
+
+# Check container logs
+docker logs -f wf-worker-pattern1
+docker logs -f wf-mgt-api
+
+docker-compose -f docker-compose-worker-pattern1.yml down -v
