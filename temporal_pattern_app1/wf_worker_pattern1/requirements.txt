@@ -1,0 +1,5 @@
+temporalio==1.6.0
+asyncio
+httpx
+psycopg[binary,pool]
+pydantic
