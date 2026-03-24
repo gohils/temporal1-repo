@@ -1,16 +1,11 @@
 
-docker compose -f docker-compose-image-postgres.yml up -d
+docker compose -f docker-compose-postgres.yml up -d
+
+docker compose -f docker-compose-worker-fastapi.yml up -d
 
 docker logs -f temporal-admin-tools      # watch real-time DB setup logs
 docker logs -f temporal-create-namespace # watch namespace setup logs
-docker compose -f docker-compose-image-postgres.yml down -v
-
-How you access Temporal from your local machine
-🔹 1. Temporal Web UI (browser) - Temporal frontend service runs on: port 7233
-http://<your-dns-name>:8080
-http://temporal-server-demo.australiaeast.cloudapp.azure.com:8080
-🔹 2. Temporal Server (SDK / client connection)
-client = await Client.connect("temporal-server-demo.australiaeast.cloudapp.azure.com:7233")
+docker compose -f docker-compose-postgres.yml down -v
 
 # Create Spot VM
 az vm create \
@@ -37,4 +32,4 @@ sudo apt install -y docker.io docker-compose
 sudo usermod -aG docker $USER
 newgrp docker
 
-docker compose -f docker-compose-postgres.yml up -d
+docker-compose -f docker-compose-image-postgres.yml up -d
