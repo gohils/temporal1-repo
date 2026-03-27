@@ -23,7 +23,7 @@ with workflow.unsafe.imports_passed_through():
     )
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "host.docker.internal:7233")
-TEMPORAL_HOST = "localhost:7233"
+# TEMPORAL_HOST = "localhost:7233"
 # TEMPORAL_HOST = "temporal-server-demo.australiaeast.cloudapp.azure.com:7233"
 
 AI_API_URL = os.getenv("AI_API_URL","https://zdoc-ai-api.azurewebsites.net")
