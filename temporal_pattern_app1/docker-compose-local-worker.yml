@@ -26,6 +26,7 @@ services:
     container_name: wf-mgt-api
     environment:
       - TEMPORAL_HOST=host.docker.internal:7233
+      - POSTGRES_CONNECTION_STRING=postgresql://postgres.sceeibvfwcdhooljytsq:Zsupabase~1@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres
       - TASK_QUEUE=default-task-queue
     ports:
       - "8000:8000"

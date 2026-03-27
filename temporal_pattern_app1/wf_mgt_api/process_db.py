@@ -211,9 +211,9 @@ def get_workflow_detail(workflow_id: str):
             return None
 
         cur.execute("""
-            SELECT activity_log_id, task_name, activity_type, activity_group,
+            SELECT activity_id, execution_order, task_name, activity_type, activity_group,
                    status, start_time, end_time, created_at
-            FROM workflow_activity_log
+            FROM workflow_activity_instance
             WHERE workflow_id = %s
             ORDER BY start_time ASC
         """, (workflow_id,))

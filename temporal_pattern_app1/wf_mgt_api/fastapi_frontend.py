@@ -208,7 +208,7 @@ async def get_process(header_id: int):
     return {"header": header, "items": items}
 
 @app.get("/process/reference/{reference_id}")
-async def get_by_reference(reference_id: str):
+async def get_by_reference(reference_id: str = 'CUST-10001'):
     """Fetch process by reference_id."""
     header = db.get_process_header_by_reference(reference_id)
     if not header:
