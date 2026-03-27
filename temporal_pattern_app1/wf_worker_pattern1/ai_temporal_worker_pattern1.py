@@ -23,7 +23,7 @@ with workflow.unsafe.imports_passed_through():
     )
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "host.docker.internal:7233")
-# TEMPORAL_HOST = "localhost:7233"
+TEMPORAL_HOST = "localhost:7233"
 # TEMPORAL_HOST = "temporal-server-demo.australiaeast.cloudapp.azure.com:7233"
 
 AI_API_URL = os.getenv("AI_API_URL","https://zdoc-ai-api.azurewebsites.net")
@@ -44,16 +44,19 @@ class ActivityOutput:
 # -----------------------------
 # Approval logging helper
 # -----------------------------
-def log_approval(wf_id, status, decision=None, role=None, user=None, comments=None):
+def log_wf_approval(wf_id, wf_type, status, signal_name=None, decision=None, role=None, user=None, comments=None,additional_data=None):
     log_approval_signal(
         workflow_id=wf_id,
+        workflow_type=wf_type,
         task_name="INVOICE_APPROVAL",
         task_type="INVOICE_APPROVAL_L1",
+        approval_signal_name=signal_name,
         assigned_role=role,
-        assigned_to=user,
+        action_by=user,
         status=status,
         decision=decision,
-        comments=comments
+        comments=comments,
+        additional_data=additional_data
     )
     print(f"📝 [APPROVAL LOGGED] status={status}, decision={decision}, role={role}, user={user}")
 
@@ -63,7 +66,7 @@ def log_approval(wf_id, status, decision=None, role=None, user=None, comments=No
 @activity.defn
 @log_activity("ai_process_doc")
 async def ai_process_doc(input: ActivityInput) -> ActivityOutput:
-    doc_url = input.payload.get("document_url")
+    doc_url = input.payload.get("input_parameters", {}).get("document_url")
     wf_id = input.context.get("workflow_id")
     simulate = input.payload.get("simulate_ocr")
     print(f"➡️ [OCR] Starting OCR for document_url={doc_url}")
@@ -124,15 +127,16 @@ async def validate_document(input: ActivityInput) -> ActivityOutput:
 async def approval_decision(input: ActivityInput) -> ActivityOutput:
     invoice = input.payload.get("invoice_data")
     wf_id = input.context.get("workflow_id")
+    wf_type = input.context.get("workflow_type")
     total = invoice.get("invoice_total", 0)
 
     if total <= 2000:
         decision = "auto_approve"
-        log_approval(wf_id, "COMPLETED", "AUTO_APPROVED", "SYSTEM", "SYSTEM", "Auto-approved")
+        log_wf_approval(wf_id=wf_id, wf_type=wf_type, status="COMPLETED", signal_name="SYSTEM", decision="AUTO_APPROVED", role="SYSTEM", user="SYSTEM", comments="Auto-approved")
         print(f"✅ [APPROVAL DECISION] Invoice {invoice.get('invoice_id')} auto-approved")
     else:
         decision = "manual_review"
-        log_approval(wf_id, "PENDING", None, "MANAGER", None, "Waiting for manual approval")
+        log_wf_approval(wf_id=wf_id, wf_type=wf_type, status="PENDING", signal_name="manual_approval", decision=None, role="MANAGER", user=None, comments="Waiting for manual approval")
         print(f"⏳ [APPROVAL DECISION] Invoice {invoice.get('invoice_id')} requires manual review")
 
     payload = {**input.payload, "approval_decision": decision}
@@ -175,7 +179,6 @@ async def post_to_erp(input: ActivityInput) -> ActivityOutput:
 async def send_rejection_notification(input: ActivityInput) -> ActivityOutput:
     wf_id = input.context.get("workflow_id")
     invoice = input.payload.get("invoice_data")
-    log_approval(wf_id, "COMPLETED", "REJECTED", "SYSTEM", "SYSTEM", "Vendor notified")
     await asyncio.sleep(0.5)
     notification = {"status":"sent","invoice_id":invoice.get("invoice_id")}
     print(f"📩 [NOTIFY] Rejection notification sent for invoice {invoice.get('invoice_id')}")
@@ -196,19 +199,29 @@ async def store_audit(input: ActivityInput) -> ActivityOutput:
 class HybridEnterpriseSTPWorkflow:
 
     def __init__(self):
-        self.manual_decision: Optional[str] = None
-        self.manual_details: Optional[Dict[str, Any]] = None
+        self.manual_approval_decision: Optional[str] = None
+        self.manual_approval_details: Optional[Dict[str, Any]] = None
+        self.execution_counter = 0
 
     @workflow.signal(name="manual_approval")
     def manual_approve(self, approval_details: Dict[str, Any]):
-        self.manual_decision = approval_details.get("decision","REJECTED").upper()
-        self.manual_details = approval_details
-        print(f"🟢 [SIGNAL] Manual approval received: {self.manual_decision}")
+        self.manual_approval_decision = approval_details.get("decision","REJECTED").upper()
+        self.manual_approval_details = approval_details
+        print(f"🟢 [SIGNAL] Manual approval received: {self.manual_approval_decision}")
 
     @workflow.run
     async def run(self, initial_payload: Dict):
+        # 🔹 initial_payload is exactly what you passed from FastAPI
+        print("📥 Received payload:", initial_payload)
+
+        def next_step():
+            self.execution_counter += 1
+            return self.execution_counter
+
         wf_id = workflow.info().workflow_id
-        context = {"workflow_id": wf_id}
+        workflow_type = initial_payload.get("workflow_type")
+        domain=initial_payload.get("domain")
+        context = {"workflow_id": wf_id,"workflow_type": workflow_type}
         payload = initial_payload.copy()
         audit = []
         retry = RetryPolicy(maximum_attempts=3)
@@ -217,38 +230,38 @@ class HybridEnterpriseSTPWorkflow:
 
         print(f"🚀 [WORKFLOW START] Workflow ID: {wf_id}, starting processing...")
         # Extract document_id if already present in payload
-        document_id = payload.get("document_url")
+        document_id = payload.get("input_parameters", {}).get("document_url")
 
         # Log workflow start with input_data and document_id
         upsert_workflow_instance(
             workflow_id=wf_id,
-            workflow_type="HybridEnterpriseSTPWorkflow",
+            workflow_type=workflow_type,
             status="STARTED",
             input_data=initial_payload,
             document_id=document_id,
-            domain=None,
+            domain=domain,
             parent_workflow=None,
             workflow_group=None,
             requires_manual_review=False
         )
 
         # 1️⃣ OCR
-        res = await workflow.execute_activity(ai_process_doc, ActivityInput(payload, context),
+        res = await workflow.execute_activity(ai_process_doc, ActivityInput( {**payload, "execution_order": next_step()}, context),
             start_to_close_timeout=timedelta(seconds=120), retry_policy=retry)
         payload.update(res.response); context.update(res.context); log("ai_process_doc", res.response)
 
         # 2️⃣ Normalize
-        res = await workflow.execute_activity(normalize_document, ActivityInput(payload, context),
+        res = await workflow.execute_activity(normalize_document, ActivityInput( {**payload, "execution_order": next_step()}, context),
             start_to_close_timeout=timedelta(seconds=30), retry_policy=retry)
         payload.update(res.response); context.update(res.context); log("normalize_document", res.response)
 
         # 3️⃣ Classify
-        res = await workflow.execute_activity(validate_document, ActivityInput(payload, context),
+        res = await workflow.execute_activity(validate_document, ActivityInput( {**payload, "execution_order": next_step()}, context),
             start_to_close_timeout=timedelta(seconds=30), retry_policy=retry)
         payload.update(res.response); context.update(res.context); log("validate_document", res.response)
 
         # 4️⃣ Approval Decision
-        res = await workflow.execute_activity(approval_decision, ActivityInput(payload, context),
+        res = await workflow.execute_activity(approval_decision, ActivityInput( {**payload, "execution_order": next_step()}, context),
             start_to_close_timeout=timedelta(seconds=30), retry_policy=retry)
         payload.update(res.response); context.update(res.context); log("approval_decision", res.response)
 
@@ -257,32 +270,32 @@ class HybridEnterpriseSTPWorkflow:
         # 5️⃣ Manual approval
         if decision=="manual_review":
             print("⏳ Waiting for manual approval signal...")
-            await workflow.wait_condition(lambda: self.manual_decision is not None, timeout=timedelta(minutes=30))
-            decision = "manual_approved" if self.manual_decision=="APPROVED" else "manual_rejected"
-            payload.update({"manual_details": self.manual_details,"approval_decision":decision})
-            log_approval(wf_id,"COMPLETED",decision.upper(),"MANAGER",self.manual_details.get("user_id"),self.manual_details.get("comments"))
-            log("manual_decision", self.manual_details)
+            await workflow.wait_condition(lambda: self.manual_approval_decision is not None, timeout=timedelta(minutes=30))
+            decision = "manual_approved" if self.manual_approval_decision=="APPROVED" else "manual_rejected"
+            payload.update({"manual_details": self.manual_approval_details,"approval_decision":decision})
+            log_wf_approval(wf_id=wf_id, wf_type=workflow_type, status="COMPLETED", signal_name="manual_approval", decision=decision.upper(), role="MANAGER", user=self.manual_approval_details.get("user_id"), comments=self.manual_approval_details.get("comments"),additional_data=self.manual_approval_details)
+            log("manual_decision", self.manual_approval_details)
             print(f"🟢 [WORKFLOW] Manual approval completed: {decision}")
 
         # 6️⃣ Route
         if decision in ["auto_approve","manual_approved"]:
-            res = await workflow.execute_activity(post_to_erp, ActivityInput(payload, context),
+            res = await workflow.execute_activity(post_to_erp, ActivityInput( {**payload, "execution_order": next_step()}, context),
                 start_to_close_timeout=timedelta(seconds=60), retry_policy=retry)
             payload.update(res.response); context.update(res.context); log("post_to_erp", res.response)
         else:
-            res = await workflow.execute_activity(send_rejection_notification, ActivityInput(payload, context),
+            res = await workflow.execute_activity(send_rejection_notification, ActivityInput( {**payload, "execution_order": next_step()}, context),
                 start_to_close_timeout=timedelta(seconds=30), retry_policy=retry)
             payload.update(res.response); context.update(res.context); log("send_rejection_notification", res.response)
 
         # 7️⃣ Audit
-        await workflow.execute_activity(store_audit, ActivityInput({"audit":audit}, context),
+        await workflow.execute_activity(store_audit, ActivityInput({"audit":audit, "execution_order": next_step()}, context),
             start_to_close_timeout=timedelta(seconds=30), retry_policy=retry)
 
         print(f"🏁 [WORKFLOW COMPLETED] Workflow {wf_id} finished with decision: {decision}")
         # Mark workflow as completed
         upsert_workflow_instance(
             workflow_id=wf_id,
-            workflow_type="HybridEnterpriseSTPWorkflow",
+            workflow_type=workflow_type,
             status="COMPLETED",
             input_data=initial_payload,
             document_id=document_id,

@@ -1,5 +1,5 @@
 # log_wf_db_pool.py
-from email.header import Header
+import uuid
 import os
 import json
 from dataclasses import asdict, is_dataclass
@@ -54,36 +54,6 @@ def to_serializable(obj):
         return [to_serializable(i) for i in obj]
     else:
         return obj
-
-# ------------------------------------------------
-# Append Activity Event
-# ------------------------------------------------
-def append_activity_event(log: Dict[str, Any]):
-    """Insert a row into workflow_activity_log"""
-    try:
-        query = """
-        INSERT INTO workflow_activity_log(
-            workflow_id, task_name, activity_type, status,
-            input_data, output_data, input_context, start_time, end_time, activity_group
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """
-        values = (
-            log.get("workflow_id"),
-            log.get("task_name"),
-            log.get("activity_type", "SystemIntegration"),
-            log.get("status"),
-            json.dumps(to_serializable(log.get("input_data"))) if log.get("input_data") else None,
-            json.dumps(to_serializable(log.get("output_data"))) if log.get("output_data") else None,
-            json.dumps(to_serializable(log.get("input_context"))) if log.get("input_context") else None,
-            log.get("start_time"),
-            log.get("end_time"),
-            log.get("activity_group")
-        )
-        with pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, values)
-    except Exception as e:
-        print("❌ DB logging failed:", e)
 
 # ------------------------------------------------
 # Upsert Workflow Instance
@@ -141,23 +111,63 @@ def upsert_workflow_instance(
         print("❌ Workflow instance logging failed:", e)
 
 # ------------------------------------------------
+# Upsert activity Instance
+# ------------------------------------------------
+def upsert_activity_event(log: Dict[str, Any]):
+    try:
+        query = """
+        INSERT INTO workflow_activity_instance(
+            activity_id,
+            workflow_id, execution_order, workflow_type, task_name, activity_type, status,
+            input_data, output_data, input_context, start_time, end_time, activity_group
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (activity_id) DO UPDATE
+        SET status = EXCLUDED.status,
+            output_data = EXCLUDED.output_data,
+            end_time = EXCLUDED.end_time
+        """
+        values = (
+            log.get("activity_id"),
+            log.get("workflow_id"),
+            log.get("execution_order"),
+            log.get("workflow_type"),
+            log.get("task_name"),
+            log.get("activity_type"),
+            log.get("status"),
+            json.dumps(to_serializable(log.get("input_data"))) if log.get("input_data") else None,
+            json.dumps(to_serializable(log.get("output_data"))) if log.get("output_data") else None,
+            json.dumps(to_serializable(log.get("input_context"))) if log.get("input_context") else None,
+            log.get("start_time"),
+            log.get("end_time"),
+            log.get("activity_group")
+        )
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, values)
+    except Exception as e:
+        print("❌ DB logging failed:", e)
+
+# ------------------------------------------------
 # Decorator: log_activity
 # ------------------------------------------------
 def log_activity(task_name: str, activity_type: str = "SystemIntegration", activity_group: Optional[str] = None):
-    """
-    Temporal-safe decorator to log STARTED/COMPLETED/FAILED events.
-    Only snapshots input_context since context is read-only.
-    """
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
+
             input_obj = args[0] if args else None
             workflow_id = getattr(input_obj, "context", {}).get("workflow_id", "UNKNOWN")
-
-            # STARTED
+            workflow_type = getattr(input_obj, "context", {}).get("workflow_type", "UNKNOWN")
+            execution_order = getattr(input_obj, "payload", {}).get("execution_order")
+            activity_id = str(uuid.uuid4())   # 🔥 UNIQUE PER EXECUTION
             start_time = datetime.utcnow()
-            append_activity_event({
+
+            # START → INSERT
+            upsert_activity_event({
+                "activity_id": activity_id,
                 "workflow_id": workflow_id,
+                "execution_order": execution_order,
+                "workflow_type": workflow_type,
                 "task_name": task_name,
                 "activity_type": activity_type,
                 "status": "STARTED",
@@ -167,44 +177,39 @@ def log_activity(task_name: str, activity_type: str = "SystemIntegration", activ
                 "activity_group": activity_group
             })
 
-            activity_log = {"workflow_id": workflow_id, "task_name": task_name, "activity_type": activity_type,"activity_group": activity_group}
-            logger.info(f"✅ Logging activity task - {task_name} started \n : {activity_log}")
-
             try:
                 result = await func(*args, **kwargs)
-                end_time = datetime.utcnow()
-                activity_event_data = {
+
+                # COMPLETE → UPDATE
+                upsert_activity_event({
+                    "activity_id": activity_id,
                     "workflow_id": workflow_id,
+                    "execution_order": execution_order,
+                    "workflow_type": workflow_type,
                     "task_name": task_name,
                     "activity_type": activity_type,
                     "status": "COMPLETED",
-                    "input_data": getattr(input_obj, "payload", None),
                     "output_data": getattr(result, "response", None),
-                    "input_context": getattr(input_obj, "context", None),
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "activity_group": activity_group
-                }
-                append_activity_event(activity_event_data)
-                logger.info(f"✅ Logging activity task - {task_name} completed \n : {activity_log}")
+                    "end_time": datetime.utcnow()
+                })
 
                 return result
 
             except Exception as e:
-                end_time = datetime.utcnow()
-                append_activity_event({
+                # FAIL → UPDATE
+                upsert_activity_event({
+                    "activity_id": activity_id,
                     "workflow_id": workflow_id,
+                    "execution_order": execution_order,
+                    "workflow_type": workflow_type,
                     "task_name": task_name,
                     "activity_type": activity_type,
                     "status": "FAILED",
-                    "input_data": getattr(input_obj, "payload", None),
                     "output_data": {"error": str(e)},
-                    "input_context": getattr(input_obj, "context", None),
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "activity_group": activity_group
+                    "end_time": datetime.utcnow()
                 })
                 raise
+
         return wrapper
     return decorator
 
@@ -223,12 +228,12 @@ VALID_DECISION = {
 }
 
 def log_approval_signal(
-    workflow_id, task_name, task_type,
-    assigned_role=None, assigned_to=None,
+    workflow_id, workflow_type, task_name, task_type, approval_signal_name=None,
+    assigned_role=None, action_by=None,
     status="PENDING", decision=None,
     comments=None, business_key=None, priority="MEDIUM",
     workflow_step=1, sla_deadline=None, escalated=False,
-    form_data=None, attachments=None, completed_at=None
+    additional_data=None, attachments=None, completed_at=None
 ):
     if status not in {"PENDING","IN_PROGRESS","COMPLETED","REJECTED","CANCELLED","EXPIRED"}:
         raise ValueError("Invalid status")
@@ -249,21 +254,21 @@ def log_approval_signal(
 
             cur.execute("""
                 INSERT INTO workflow_approval_task(
-                    workflow_id, task_name, task_type,
-                    assigned_role, assigned_to,
+                    workflow_id, workflow_type, task_name, task_type, approval_signal_name,
+                    assigned_role, action_by,
                     status, decision, comments,
                     business_key, priority,
                     workflow_step, sla_deadline, escalated,
-                    form_data, attachments,
+                    additional_data, attachments,
                     created_at, completed_at, is_current
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
             """, (
-                workflow_id, task_name, task_type,
-                assigned_role, assigned_to,
+                workflow_id, workflow_type, task_name, task_type, approval_signal_name,
+                assigned_role, action_by,
                 status, decision, comments,
                 business_key, priority,
                 workflow_step, sla_deadline, escalated,
-                json.dumps(form_data) if form_data else None,
+                json.dumps(additional_data) if additional_data else None,
                 json.dumps(attachments) if attachments else None,
                 now, completed_at
             ))

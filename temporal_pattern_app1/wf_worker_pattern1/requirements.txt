@@ -1,5 +1,6 @@
 temporalio==1.6.0
 asyncio
-httpx
-psycopg[binary,pool]
-pydantic
+httpx==0.28.1
+psycopg-binary==3.3.3
+psycopg-pool==3.3.0
+pydantic==2.12.5
