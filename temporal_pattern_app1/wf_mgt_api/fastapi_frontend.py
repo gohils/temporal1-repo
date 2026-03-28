@@ -77,18 +77,19 @@ class WorkflowSignalRequest(BaseModel):
 class DocumentInput(BaseModel):
     doc_type: str = None
     document_url: Optional[str] = "https://zblobarchive.blob.core.windows.net/samples/aus-passport-sample1.png"
+    document_id: Optional[str] = "DOC10001"
     declared_data: Optional[Dict[str, Any]] = None
 
 class ProcessCreateRequest(BaseModel):
     reference_id: Optional[str] 
-    workflow_type: str 
+    workflow_type: str = "HybridEnterpriseSTPWorkflow"
     process_name: str = "KYC"
     process_group: str = "Sales"
     declared_data: Dict[str, Any] = None
     additional_data: Optional[Dict[str, Any]] = None
 
 class HeaderUpdateRequest(BaseModel):
-    workflow_type: Optional[str] = "Customer Onboarding"
+    workflow_type: Optional[str] = "HybridEnterpriseSTPWorkflow"
     process_name: Optional[str] = "KYC"
     process_group: Optional[str] = "Sales"
     declared_data: Optional[Dict[str, Any]] = None
@@ -104,17 +105,15 @@ async def create_process(req: ProcessCreateRequest):
     """ Create process with header + items (stores document_id + document_url). \n 
     ```json
     {
-        "reference_id": "CUST-10001",
-        "workflow_type": "Customer Onboarding",
-        "process_name": "KYC",
-        "process_group": "Sales",
+        "reference_id": "INV901101",
+        "workflow_type": "HybridEnterpriseSTPWorkflow",
+        "process_name": "INVOICE_PROCESSING",
+        "process_group": "FINANCE",
         "declared_data": {
             "first_name": "John",
             "last_name": "Doe",
-            "dob": "1990-01-01",
-            "address": "123 Collins Street, Melbourne VIC 3000",
+            "address": "15 Main Street, Melbourne, VIC 3029",
             "email": "john.doe@example.com",
-            "phone": "+61412345678",
             "country": "Australia"
         },
         "additional_data": {
@@ -143,6 +142,14 @@ async def add_item(reference_id: str, documents: List[DocumentInput]):
     """
     Add one or more document items to an existing process header.
     For each document type, previous active documents are deactivated. \n
+        [{  
+            "doc_type": "Invoice",
+            "document_id": "INV901101",
+            "document_url": "https://zblobarchive.blob.core.windows.net/samples/invoice-iphone1.png",
+            "declared_data": { "invoice_date": "2023-12-25" }
+            }
+        ]
+        
         [
             {
                 "doc_type": "passport",
@@ -156,9 +163,7 @@ async def add_item(reference_id: str, documents: List[DocumentInput]):
             {
             "doc_type": "utility_bill",
             "document_url": "https://zblobarchive.blob.core.windows.net/samples/agl_sample1.jpg",
-            "declared_data": {
-                "bill_date": "2023-04-23"
-            }
+            "declared_data": { "bill_date": "2023-04-23" }
             }
         ]
     """
@@ -172,6 +177,7 @@ async def add_item(reference_id: str, documents: List[DocumentInput]):
         item_id = db.create_process_item({
             "header_id": header_id,
             "doc_type": doc.doc_type,
+            "document_id":doc.document_id,
             "document_url": doc.document_url,
             "declared_data": doc.declared_data,
             "status": "PROCESSING"
@@ -269,6 +275,59 @@ async def start_workflow(req: WorkflowStartRequest):
     except Exception as e:
         raise HTTPException(500, f"Failed to start workflow: {e}")
 
+# -------------------------------
+# Start workflow by reference_id (fetch header + items) - non-blocking
+# -------------------------------
+@app.post("/workflow/start_by_reference/{reference_id}")
+async def start_workflow_by_reference(reference_id: str):
+    """
+    Fetch process by reference_id (header + items) and start a Temporal workflow.
+    Returns immediately with workflow_id and status.
+    """
+    # 1️⃣ Fetch header
+    header = db.get_process_header_by_reference(reference_id)
+    if not header:
+        raise HTTPException(404, "Header not found")
+
+    # 2️⃣ Fetch items
+    items = db.get_items_by_header(header["id"])
+
+    # Define only fields needed by workflow
+    ALLOWED_ITEM_FIELDS = { "doc_type", "document_url", "document_id", "declared_data"}
+    clean_items = []
+    for item in items:
+        clean_item = {k: v for k, v in item.items() if k in ALLOWED_ITEM_FIELDS}
+        clean_items.append(clean_item)
+
+    # 3️⃣ Construct workflow input
+    workflow_input = {
+        "reference_id": header.get("reference_id"),
+        "header_id": header.get("id"),
+        "workflow_type": header.get("workflow_type"),
+        "process_name": header.get("process_name"),
+        "process_group": header.get("process_group"),
+        "declared_data": header.get("declared_data"),
+        "additional_data": header.get("additional_data"),
+        "items": clean_items
+    }
+
+    # 4️⃣ Generate a unique workflow ID
+    workflow_id = f"{header.get('workflow_type')}-{uuid.uuid4().hex[:8]}"
+
+    # 5️⃣ Start workflow
+    print("workflow start input payload - \n ",workflow_input)
+    client = await get_client()
+    try:
+        await client.start_workflow(
+            header.get("workflow_type"),
+            args=[workflow_input],  # pass dynamic payload
+            id=workflow_id,
+            task_queue=DEFAULT_TASK_QUEUE
+        )
+        return {"workflow_id": workflow_id, "status": "started"}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to start workflow: {e}")
+    
 # -------------------------------
 # Terminate workflow
 # -------------------------------

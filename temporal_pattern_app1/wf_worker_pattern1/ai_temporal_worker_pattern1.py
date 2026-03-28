@@ -23,7 +23,7 @@ with workflow.unsafe.imports_passed_through():
     )
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "host.docker.internal:7233")
-# TEMPORAL_HOST = "localhost:7233"
+TEMPORAL_HOST = "localhost:7233"
 # TEMPORAL_HOST = "temporal-server-demo.australiaeast.cloudapp.azure.com:7233"
 
 AI_API_URL = os.getenv("AI_API_URL","https://zdoc-ai-api.azurewebsites.net")
@@ -67,6 +67,18 @@ def log_wf_approval(wf_id, wf_type, status, signal_name=None, decision=None, rol
 @log_activity("ai_process_doc")
 async def ai_process_doc(input: ActivityInput) -> ActivityOutput:
     doc_url = input.payload.get("input_parameters", {}).get("document_url")
+
+    # Try old payload first
+    doc_url = input.payload.get("input_parameters", {}).get("document_url")
+
+    # Fallback to first item in "items" if doc_url is not found
+    if not doc_url:
+        items = input.payload.get("items", [])
+        if items:
+            doc_url = items[0].get("document_url")
+
+    print("======ai_process_doc===== doc_url ========\n",doc_url )
+
     wf_id = input.context.get("workflow_id")
     simulate = input.payload.get("simulate_ocr")
     print(f"➡️ [OCR] Starting OCR for document_url={doc_url}")
@@ -212,7 +224,7 @@ class HybridEnterpriseSTPWorkflow:
     @workflow.run
     async def run(self, initial_payload: Dict):
         # 🔹 initial_payload is exactly what you passed from FastAPI
-        print("📥 Received payload:", initial_payload)
+        print("📥 workflow input payload received:", initial_payload)
 
         def next_step():
             self.execution_counter += 1
@@ -299,6 +311,7 @@ class HybridEnterpriseSTPWorkflow:
             status="COMPLETED",
             input_data=initial_payload,
             document_id=document_id,
+            domain=domain,
             requires_manual_review=(decision == "manual_review")
         )
         return {"status":"COMPLETED","decision":decision,"erp_doc_id":payload.get("erp_doc_id"),"audit":audit}
