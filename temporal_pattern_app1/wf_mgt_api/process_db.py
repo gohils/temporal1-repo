@@ -22,7 +22,7 @@ POSTGRES_CONNECTION_STRING = os.getenv("POSTGRES_CONNECTION_STRING")
 if not POSTGRES_CONNECTION_STRING:
     raise ValueError("POSTGRES_CONNECTION_STRING is not set")
 
-pool = ConnectionPool(POSTGRES_CONNECTION_STRING, min_size=2, max_size=10)
+pool = ConnectionPool(POSTGRES_CONNECTION_STRING, min_size=1, max_size=3)
 
 # ------------------------------------------------
 # Utility functions
@@ -44,6 +44,20 @@ def fetch_one(cur) -> Optional[Dict[str, Any]]:
         return dict(zip([d[0] for d in cur.description], row))
     return None
 
+def run_query(query: str, values: tuple = ()):
+    """Execute any SELECT query and return results as list of dicts."""
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(query, values)
+                if cur.description:  # SELECT returns rows
+                    rows = cur.fetchall()
+                    columns = [desc[0] for desc in cur.description]
+                    return [dict(zip(columns, row)) for row in rows]
+                return []  # No rows returned
+            except Exception as e:
+                raise RuntimeError(f"Query failed: {e}")
+            
 # ------------------------------------------------
 # Process Header
 # ------------------------------------------------
@@ -52,7 +66,7 @@ def create_process_header(data: Dict[str, Any]) -> int:
     query = """
         INSERT INTO automation_process_header (
             reference_id, workflow_type, process_name, process_group,
-            declared_data, verification_status, verification_comments, additional_data
+            declared_data, verification_status, verification_comments, additional_header_data
         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         RETURNING id
     """
@@ -64,7 +78,7 @@ def create_process_header(data: Dict[str, Any]) -> int:
         to_json(data.get("declared_data")),
         data.get("verification_status", "PROCESSING"),
         data.get("verification_comments"),
-        to_json(data.get("additional_data")),
+        to_json(data.get("additional_header_data")),
     )
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(query, values)
@@ -142,6 +156,18 @@ def get_items_by_header(header_id: int) -> List[Dict[str, Any]]:
         cur.execute(query, (header_id,))
         return fetch_all(cur)
 
+def get_latest_ocr_by_item(item_id: int):
+    query = """
+        SELECT extracted_fields, status
+        FROM workflow_ocr_data
+        WHERE item_id = %s
+        ORDER BY version DESC
+        LIMIT 1
+    """
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(query, (item_id,))
+        return fetch_one(cur) 
+    
 def deactivate_existing_item(header_id: int, doc_type: str):
     """Deactivate existing active item for same document type."""
     query = """
@@ -155,12 +181,53 @@ def deactivate_existing_item(header_id: int, doc_type: str):
 # ------------------------------------------------
 # Monitoring / Workflow Queries
 # ------------------------------------------------
+# -------------------------------
+# DB function to list headers
+# -------------------------------
+def list_process_headers(
+    workflow_type: Optional[str] = None,
+    process_name: Optional[str] = None,
+    verification_status: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """Fetch all process headers with optional filters"""
+    base_query = """
+        SELECT id, reference_id, workflow_type, process_name, process_group,
+               declared_data, verification_status, verification_comments,
+               verification_data, additional_header_data,
+               created_at, updated_at
+        FROM automation_process_header
+        WHERE 1=1
+    """
+    params = []
+    if workflow_type:
+        base_query += " AND workflow_type = %s"
+        params.append(workflow_type)
+    if process_name:
+        base_query += " AND process_name = %s"
+        params.append(process_name)
+    if verification_status:
+        base_query += " AND verification_status = %s"
+        params.append(verification_status)
+    if start_date:
+        base_query += " AND created_at >= %s"
+        params.append(start_date)
+    if end_date:
+        base_query += " AND created_at <= %s"
+        params.append(end_date)
+    base_query += " ORDER BY created_at DESC"
+
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(base_query, params)
+        return fetch_all(cur)
+
 
 def list_workflows(status=None, start_date=None, end_date=None):
     """Fetch workflows with optional filters."""
     query = """
-        SELECT workflow_id, workflow_type, status, domain, document_id,
-               requires_manual_review, start_time, end_time
+        SELECT workflow_id, workflow_type, status, domain, header_id, reference_id,
+               start_time, end_time, created_at, updated_at
         FROM workflow_instance
         WHERE 1=1
     """
@@ -199,9 +266,10 @@ def get_workflow_detail(workflow_id: str):
     with pool.connection() as conn, conn.cursor() as cur:
 
         cur.execute("""
-            SELECT workflow_id, workflow_type, status, domain, document_id,
-                   requires_manual_review, input_data, parent_workflow, workflow_group,
-                   start_time, end_time, created_at, updated_at
+            SELECT workflow_id, workflow_type, status, domain, reference_id, header_id,
+                input_data, parent_workflow, workflow_group,
+                additional_data, decision, error_message, error_step, triggered_by, source,
+                start_time, end_time, created_at, updated_at
             FROM workflow_instance
             WHERE workflow_id = %s
         """, (workflow_id,))
@@ -211,8 +279,10 @@ def get_workflow_detail(workflow_id: str):
             return None
 
         cur.execute("""
-            SELECT activity_id, execution_order, task_name, activity_type, activity_group,
-                   status, start_time, end_time, created_at
+            SELECT activity_id, step_key, task_name, activity_type, activity_group,
+                workflow_type, header_id, item_id,
+                input_data, output_data, input_context,
+                status, start_time, end_time, created_at
             FROM workflow_activity_instance
             WHERE workflow_id = %s
             ORDER BY start_time ASC
@@ -247,3 +317,4 @@ def log_workflow_signal(workflow_id: str, signal_name: str, signal_input: Dict[s
     except Exception as e:
         logger.error(f"❌ log_workflow_signal failed: {e}")
         raise
+

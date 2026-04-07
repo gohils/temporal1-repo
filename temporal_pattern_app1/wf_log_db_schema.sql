@@ -10,12 +10,23 @@ CREATE TABLE IF NOT EXISTS workflow_instance (
     workflow_id TEXT PRIMARY KEY,
     workflow_type TEXT NOT NULL,
     status TEXT,
+    error_message TEXT,
+    error_step TEXT,
+    decision TEXT,               -- AUTO_APPROVED / REJECTED / MANUAL_REVIEW
+    current_step TEXT,          -- "OCR", "VALIDATION", "APPROVAL"    
     input_data JSONB,
     domain TEXT,
-    document_id TEXT,
+    reference_id TEXT,
+    -- Link to header / case
+    header_id BIGINT ,
+
     parent_workflow TEXT,
     workflow_group TEXT,
-    requires_manual_review BOOLEAN DEFAULT FALSE,
+
+    -- UI / extensibility
+    additional_data JSONB,
+    triggered_by TEXT,      -- user / system
+    source TEXT,             -- API / UI / batch
     start_time TIMESTAMP DEFAULT NOW(),
     end_time TIMESTAMP,
     created_at TIMESTAMP DEFAULT NOW(),
@@ -29,7 +40,11 @@ CREATE TABLE IF NOT EXISTS workflow_instance (
 CREATE TABLE IF NOT EXISTS workflow_activity_instance (
     activity_id  TEXT PRIMARY KEY,
     workflow_id TEXT NOT NULL,
-    execution_order INT,
+    child_workflow_id TEXT, -- for sub-workflows (optional)
+    header_id TEXT,         -- <-- added for header linkage
+    item_id TEXT,           -- <-- added for item/document linkage
+    step_key TEXT,          -- 01_PREPROCESSING, 02_OCR, 03_VALIDATION, 04_APPROVAL, etc.
+    display_name TEXT,
     workflow_type TEXT,
     task_name TEXT,
     activity_type TEXT,
@@ -51,6 +66,8 @@ CREATE TABLE IF NOT EXISTS workflow_approval_task (
     approval_task_id BIGSERIAL PRIMARY KEY,
 
     -- Core workflow linkage
+    header_id BIGINT,                    -- Link to automation_process_header
+    item_id BIGINT,                    -- Link to automation_process_header_item (optional, for document-level tasks)
     workflow_id TEXT NOT NULL,
     workflow_type TEXT,
     task_name TEXT NOT NULL,              -- Display name (UI)
@@ -92,13 +109,17 @@ CREATE TABLE IF NOT EXISTS workflow_approval_task (
 -- 4. OCR DATA (Document ingestion layer)
 -- =========================================================
 CREATE TABLE IF NOT EXISTS workflow_ocr_data (
-    document_id BIGSERIAL PRIMARY KEY,
+    ocr_document_id BIGSERIAL PRIMARY KEY,
     workflow_id TEXT NOT NULL,
+    header_id BIGINT,
+    item_id BIGINT,
+    doc_type TEXT,
     document_url TEXT,
     ocr_raw TEXT,
     ocr_result JSONB,
     extracted_fields JSONB,
     status TEXT DEFAULT 'NEW',
+    version INT DEFAULT 1,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -110,11 +131,14 @@ CREATE TABLE IF NOT EXISTS erp_crm_documents (
     doc_id TEXT PRIMARY KEY,
     doc_type TEXT NOT NULL,
     workflow_id TEXT,
+    child_workflow_id  TEXT , -- for sub-workflows (optional)
+    header_id BIGINT,
+    item_id BIGINT,
     workflow_type TEXT,
     doc_date TEXT,
     owner_name TEXT,
     reference_id TEXT,
-    approval_status TEXT DEFAULT 'PENDING',
+    approval_status TEXT ,
     approved_by TEXT,
     header_data JSONB NOT NULL,
     line_items JSONB,
@@ -139,7 +163,8 @@ CREATE TABLE IF NOT EXISTS automation_process_header (
     -- Aggregate / case-level verification (optional, derived from items)
     verification_status TEXT,        -- VERIFIED / FAILED / REVIEW
     verification_comments TEXT,      -- optional summary / human explanation
-    additional_data JSONB,             
+    verification_data JSONB,             
+    additional_header_data JSONB,             
 
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
@@ -157,8 +182,10 @@ CREATE TABLE IF NOT EXISTS automation_process_item (
     workflow_id TEXT,
 
     -- Document / line item details
+    document_id TEXT,                    -- document number, employee ID, etc.
+    declared_doc_type TEXT,                    -- passport, invoice, direct debit
     doc_type TEXT,                    -- passport, invoice, direct debit
-    document_id TEXT,               -- link to workflow_ocr_data
+    latest_ocr_document_id BIGINT,               -- link to workflow_ocr_data
     document_url TEXT,                -- store S3/Blob URL of uploaded document
     declared_data JSONB,              -- optional per-document declared info
     is_active BOOLEAN DEFAULT TRUE,   -- only 1 active per doc_type
@@ -169,6 +196,7 @@ CREATE TABLE IF NOT EXISTS automation_process_item (
     verification_status TEXT,         -- PROCESSING, VERIFIED, FAILED, REVIEW
     verification_comments TEXT,       -- Human or AI explanation
     verification_details JSONB,       -- LLM + rules reasoning
+    additional_item_data JSONB,             
 
     -- Processing status (tracking per document)
     status TEXT DEFAULT 'PROCESSING', -- PROCESSING, VERIFIED, FAILED, REVIEW

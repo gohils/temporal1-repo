@@ -1,19 +1,28 @@
 # main.py
+from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Query, Request, UploadFile, Form, HTTPException
+import requests
 import os
 import json
+from pydantic import BaseModel
 import uuid
 import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
 from temporalio.client import Client, WorkflowHandle
 import asyncio
 
 # Import DB abstraction layer
 import process_db as db
+from erp_routes import router as erp_router
+from crud_router import router as crud_router
+
+from fastapi.middleware.cors import CORSMiddleware
+
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +30,16 @@ logger = logging.getLogger(__name__)
 # FastAPI App
 # ------------------------------------------------
 app = FastAPI(title="IBPA API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"] ,  # React dev server
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# Include ERP router
+app.include_router(erp_router)
+app.include_router(crud_router)
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 DEFAULT_TASK_QUEUE = os.getenv("TASK_QUEUE", "default-task-queue")
@@ -62,7 +81,7 @@ class WorkflowStartRequest(BaseModel):
     workflow_type: str = "HybridEnterpriseSTPWorkflow"
     workflow_prefix: str = "AI_DOC_Workflow"
     domain: str = "ProcessAutomation"
-    input_parameters: Dict[str, Any] = {"document_url": "https://zblobarchive.blob.core.windows.net/samples/invoice-iphone1.png"}
+    input_parameters: Dict[str, Any] 
     task_queue: str = DEFAULT_TASK_QUEUE
 
 class WorkflowSignalRequest(BaseModel):
@@ -75,9 +94,9 @@ class WorkflowSignalRequest(BaseModel):
 # Models
 # ------------------------------------------------
 class DocumentInput(BaseModel):
-    doc_type: str = None
+    doc_type: Optional[str] = None
     document_url: Optional[str] = "https://zblobarchive.blob.core.windows.net/samples/aus-passport-sample1.png"
-    document_id: Optional[str] = "DOC10001"
+    document_id: Optional[str] = None
     declared_data: Optional[Dict[str, Any]] = None
 
 class ProcessCreateRequest(BaseModel):
@@ -100,25 +119,187 @@ class HeaderUpdateRequest(BaseModel):
 # ------------------------------------------------
 # API Endpoints
 # ------------------------------------------------
+CLOUD_UPLOAD_API = "https://zdoc-ai-api.azurewebsites.net/azure-image"
+
+# ------------------------------
+# Pydantic models
+# ------------------------------
+class ItemDocument(BaseModel):
+    doc_type: str  # declared by user
+    file_name: str
+
+# class KycSubmissionRequest(BaseModel):
+#     first_name: str
+#     last_name: str
+#     email: str
+#     phone: str
+#     address: str
+#     documents: List[ItemDocument]
+
+# ------------------------------
+# Helper to upload file to cloud
+# ------------------------------
+def upload_file_to_cloud(file: UploadFile) -> str:
+    """
+    Upload file to Azure API and return the file URL.
+    """
+    url = "https://zdoc-ai-api.azurewebsites.net/azure-image"
+    files = {"file": (file.filename, file.file, file.content_type)}
+    response = requests.post(url, files=files)
+    if response.status_code != 200:
+        raise HTTPException(500, f"File upload failed: {response.text}")
+    data = response.json()
+    return data.get("fileUrl")
+
+# ------------------------------
+# Process Submission Endpoint
+# ------------------------------
+@app.post("/kyc/submit")
+async def submit_new_kyc_process_details(
+    request: Request,
+    firstName: str = Form(...),
+    lastName: str = Form(...),
+    email: str = Form(...),
+    phone: str = Form(...),
+    address: str = Form(...),
+    documents: List[UploadFile] = File(...),
+    declared_doc_types: List[str] = Form(...)
+):
+    """
+    Submit KYC information with multiple documents.
+    Generates a business-friendly reference_id, uploads files, stores header + items.
+    """
+    print("======input form data submit_kyc=====\n", await request.form())
+    if not documents or len(documents) != len(declared_doc_types):
+        raise HTTPException(400, "Number of documents and declared_doc_types must match")
+    
+    # 1️⃣ Generate business-friendly reference_id (case ID)
+    today = datetime.now().strftime("%Y%m%d")
+    short_uuid = str(uuid.uuid4().hex[:6]).upper()
+    reference_id = f"KYC-{today}-{short_uuid}"
+
+    # 2️⃣ Prepare declared_data for header
+    declared_data = {
+        "first_name": firstName,
+        "last_name": lastName,
+        "email": email,
+        "phone": phone,
+        "address": address
+    }
+
+    # 3️⃣ Create header in DB
+    header_id = db.create_process_header({
+        "reference_id": reference_id,
+        "workflow_type": "CustomerOnboardingWorkflow",
+        "process_name": "KYC",
+        "process_group": "Sales",
+        "declared_data": declared_data,
+        "verification_status": "PROCESSING",
+        "additional_data": {"submission_source": "customer_portal"}
+    })
+
+    # 4️⃣ Upload documents and create items
+    item_ids = []
+    doc_results = []
+    for file, doc_type in zip(documents, declared_doc_types):
+        file_url = upload_file_to_cloud(file)
+        
+        item_id = db.create_process_item({
+            "header_id": header_id,
+            "doc_type": doc_type,               
+            "document_url": file_url,
+            "declared_data": {"document_type": doc_type}, # declared by user
+            "status": "PROCESSING",
+            "is_active": True
+        })
+        item_ids.append(item_id)
+        doc_results.append({"doc_type": doc_type, "document_url": file_url})
+    
+    # 5️⃣ Return response to UI
+    return {
+        "reference_id": reference_id,
+        "header_id": header_id,
+        "documents": doc_results,
+        "message": "KYC submitted successfully. Use reference_id to track status."
+    }
+
+@app.post("/invoice/submit")
+async def submit_invoice(
+    request: Request,
+    invoiceNumber: str = Form(...),
+    invoiceDate: str = Form(...),
+    vendorName: str = Form(...),
+    amount: str = Form(...),
+    description: str = Form(...),
+    invoiceFile: UploadFile = File(...),
+):
+    today = datetime.now().strftime("%Y%m%d")
+    short_uuid = str(uuid.uuid4().hex[:6]).upper()
+    reference_id = f"INV-{today}-{short_uuid}"
+
+    header_id = db.create_process_header({
+        "reference_id": reference_id,
+        "workflow_type": "InvoiceProcessingWorkflow",
+        "process_name": "Invoice",
+        "process_group": "Finance",
+        "declared_data": {
+            "invoice_number": invoiceNumber,
+            "invoice_date": invoiceDate,
+            "vendor_name": vendorName,
+            "amount": amount,
+            "description": description,
+        },
+        "verification_status": "PROCESSING",
+        "additional_data": {"submission_source": "invoice_portal"}
+    })
+
+    file_url = upload_file_to_cloud(invoiceFile)
+    item_id = db.create_process_item({
+        "header_id": header_id,
+        "doc_type": "invoice",
+        "document_url": file_url,
+        "declared_data": {"document_type": "invoice"},
+        "status": "PROCESSING",
+        "is_active": True
+    })
+
+    return {
+        "reference_id": reference_id,
+        "header_id": header_id,
+        "document": {"doc_type": "invoice", "document_url": file_url},
+        "message": "Invoice submitted successfully. Use reference_id to track status."
+    }
+
 @app.post("/process/create")
 async def create_process(req: ProcessCreateRequest):
     """ Create process with header + items (stores document_id + document_url). \n 
     ```json
+    {
+        "reference_id": "CUST-10001",
+        "workflow_type": "CustomerOnboardingWorkflow",
+        "process_name": "KYC",
+        "process_group": "Sales",
+        "declared_data": {
+                "customer_id": "CUST-10001",
+                "first_name": "Anthony",
+                "last_name": "Marcus",
+                "email": "anthony.marcus@example.com",
+                "phone": "+61-400-000-000",
+                "address": "15 Main Street, Melbourne, VIC 3000"
+            },
+        "additional_data": {
+            "channel": "web",
+            "source": "self_service_portal"
+            }
+    }
     {
         "reference_id": "INV901101",
         "workflow_type": "HybridEnterpriseSTPWorkflow",
         "process_name": "INVOICE_PROCESSING",
         "process_group": "FINANCE",
         "declared_data": {
-            "first_name": "John",
-            "last_name": "Doe",
-            "address": "15 Main Street, Melbourne, VIC 3029",
-            "email": "john.doe@example.com",
+            "purchase_order": "PO101101",
             "country": "Australia"
-        },
-        "additional_data": {
-            "source": "web_app",
-            "channel": "self_service_portal"
         }
     }
     """
@@ -142,30 +323,29 @@ async def add_item(reference_id: str, documents: List[DocumentInput]):
     """
     Add one or more document items to an existing process header.
     For each document type, previous active documents are deactivated. \n
-        [{  
-            "doc_type": "Invoice",
-            "document_id": "INV901101",
-            "document_url": "https://zblobarchive.blob.core.windows.net/samples/invoice-iphone1.png",
-            "declared_data": { "invoice_date": "2023-12-25" }
-            }
-        ]
-        
-        [
-            {
-                "doc_type": "passport",
-                "document_url": "https://zblobarchive.blob.core.windows.net/samples/aus-passport-sample1.png",
-                "declared_data": {
-                "document_number": "P12345678",
-                "expiry_date": "2030-12-31",
-                "country": "AUS"
-                }
-            },
-            {
-            "doc_type": "utility_bill",
-            "document_url": "https://zblobarchive.blob.core.windows.net/samples/agl_sample1.jpg",
-            "declared_data": { "bill_date": "2023-04-23" }
-            }
-        ]
+    ```json
+    [
+        {
+            "doc_type": null,
+            "document_url": "https://zblobarchive.blob.core.windows.net/samples/driver_license.png",
+            "declared_data": {"document_type_hint": "driver_license"}
+        },
+        {
+            "doc_type": null,
+            "document_url": "https://zblobarchive.blob.core.windows.net/samples/aus-passport-sample1.png",
+            "declared_data": {"document_type_hint": "passport"}
+        },
+        {
+            "doc_type": null,
+            "document_url": "https://zblobarchive.blob.core.windows.net/samples/utility_bill.png",
+            "declared_data": {"document_type_hint": "utility_bill"}
+        }
+    ]
+    [{  "doc_type": "Invoice",
+        "document_id": "INV901101",
+        "document_url": "https://zblobarchive.blob.core.windows.net/samples/invoice-iphone1.png",
+        "declared_data": { "invoice_date": "2023-12-25" }  }]
+
     """
     header = db.get_process_header_by_reference(reference_id)
     if not header:
@@ -204,6 +384,22 @@ async def update_header(header_id: int, req: HeaderUpdateRequest):
     db.update_process_header(header_id, update_data)
     return {"header": db.get_process_header(header_id)}
 
+@app.get("/monitor/headers")
+def get_headers(
+    workflow_type: Optional[str] = None,
+    process_name: Optional[str] = None,
+    verification_status: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """
+    Fetch all process headers with optional filters.
+    Example: /monitor/headers?workflow_type=KYC&process_name=Customer%20Onboarding&verification_status=REVIEW
+    """
+    return db.list_process_headers(workflow_type, process_name, verification_status, start_date, end_date)
+
+
+
 @app.get("/process/{header_id}")
 async def get_process(header_id: int):
     """Fetch process by header_id."""
@@ -214,13 +410,29 @@ async def get_process(header_id: int):
     return {"header": header, "items": items}
 
 @app.get("/process/reference/{reference_id}")
-async def get_by_reference(reference_id: str = 'CUST-10001'):
+async def get_by_reference(reference_id: str):
     """Fetch process by reference_id."""
     header = db.get_process_header_by_reference(reference_id)
     if not header:
         raise HTTPException(404, "Not found")
+
     items = db.get_items_by_header(header["id"])
-    return {"header": header, "items": items}
+
+    enriched_items = []
+    for item in items:
+        ocr = db.get_latest_ocr_by_item(item["id"])
+
+        enriched_items.append({
+            **item,
+            "extractedFields": ocr.get("extracted_fields") if ocr else None,
+            "ocr_status": ocr.get("status") if ocr else "PENDING"
+        })
+
+    return {
+        "header": header,
+        "items": enriched_items
+    }
+
 
 # ------------------------------
 # Workflow Monitoring Endpoints
@@ -245,6 +457,32 @@ def workflow_detail(workflow_id: str):
         raise HTTPException(404, "Workflow not found")
     return result
 
+class SQLQuery(BaseModel):
+    sql_query: str = """SELECT id, workflow_type, declared_data FROM automation_process_header LIMIT 5;"""  
+
+@app.post("/api/app_data_retrieval")
+def run_any_query(query: SQLQuery):
+    raw_sql = query.sql_query.strip()
+    sql_lower = raw_sql.lower()
+
+    # ✅ Allow only SELECT queries
+    if not sql_lower.startswith("select"):
+        raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
+
+    # ❌ Block dangerous keywords
+    forbidden = ["insert", "update", "delete", "drop", "alter", "truncate"]
+    if any(word in sql_lower for word in forbidden):
+        raise HTTPException(status_code=400, detail="Forbidden SQL operation detected")
+
+    # ✅ Enforce LIMIT (basic protection)
+    if "limit" not in sql_lower:
+        raw_sql += " LIMIT 100"
+    try:
+        rows = db.run_query(raw_sql)
+        return {"data": rows, "meta": {"count": len(rows)}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # -------------------------------
 # Start workflow (non-blocking)
 # -------------------------------
@@ -261,13 +499,39 @@ async def start_workflow(req: WorkflowStartRequest):
         },
         "task_queue": "default-task-queue"
         }
+        {
+        "workflow_type": "CustomerOnboardingWorkflow",
+        "workflow_prefix": "CustomerOnboarding",
+        "domain": "RetailBanking",
+        "task_queue": "customer-onboarding",
+            "input_parameters": {
+            "reference_id": "CUST-10001",
+            "documents": [
+                {
+                "document_url": "https://zblobarchive.blob.core.windows.net/samples/aus_dl_sample1.JPG",
+                "declared_data": {"document_type": "driver_license"}
+                },
+                {
+                "document_url": "https://zblobarchive.blob.core.windows.net/samples/aus-passport-sample1.png",
+                "declared_data": {"document_type": "passport"}
+                },
+                {
+                "document_url": "https://zblobarchive.blob.core.windows.net/samples/agl_sample1.jpg",
+                "declared_data": {"document_type": "utility_bill"}
+                }
+            ]
+            }
+            
+        }
     """
     client = await get_client()
     workflow_id = f"{req.workflow_prefix}-{uuid.uuid4()}"
+
+    print(f"🚀 Starting workflow {workflow_id} of type {req.workflow_type} with input:\n{json.dumps(req.input_parameters, indent=2)} ")
     try:
         await client.start_workflow(
             req.workflow_type,
-            args=[req],
+            args=[req.dict()],
             id=workflow_id,
             task_queue=req.task_queue
         )
@@ -293,7 +557,7 @@ async def start_workflow_by_reference(reference_id: str):
     items = db.get_items_by_header(header["id"])
 
     # Define only fields needed by workflow
-    ALLOWED_ITEM_FIELDS = { "doc_type", "document_url", "document_id", "declared_data"}
+    ALLOWED_ITEM_FIELDS = { "id", "doc_type", "document_url", "document_id", "declared_data"}
     clean_items = []
     for item in items:
         clean_item = {k: v for k, v in item.items() if k in ALLOWED_ITEM_FIELDS}
@@ -312,7 +576,7 @@ async def start_workflow_by_reference(reference_id: str):
     }
 
     # 4️⃣ Generate a unique workflow ID
-    workflow_id = f"{header.get('workflow_type')}-{uuid.uuid4().hex[:8]}"
+    workflow_id = f"{header.get('process_name','AI_PROCESS')}-{header.get('reference_id')}-{uuid.uuid4().hex[:8]}"
 
     # 5️⃣ Start workflow
     print("workflow start input payload - \n ",workflow_input)
@@ -375,6 +639,7 @@ async def send_signal(req: WorkflowSignalRequest):
         print(f"❌ send_signal failed: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to send signal: {e}")
     
+
 # ------------------------------------------------
 # Run FastAPI
 # ------------------------------------------------
