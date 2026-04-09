@@ -542,6 +542,11 @@ async def start_workflow(req: WorkflowStartRequest):
 # -------------------------------
 # Start workflow by reference_id (fetch header + items) - non-blocking
 # -------------------------------
+# ✅ workflow TASK QUEUE MAP
+TASK_QUEUE_MAP = {
+    "InvoiceProcessingWorkflow": "finance-invoice-queue",
+    "CustomerOnboardingWorkflow": "kyc-onboarding-queue",
+}
 @app.post("/workflow/start_by_reference/{reference_id}")
 async def start_workflow_by_reference(reference_id: str):
     """
@@ -553,42 +558,72 @@ async def start_workflow_by_reference(reference_id: str):
     if not header:
         raise HTTPException(404, "Header not found")
 
-    # 2️⃣ Fetch items
-    items = db.get_items_by_header(header["id"])
+    workflow_name = header.get("workflow_type")
+    if not workflow_name:
+        raise HTTPException(400, "Missing workflow_type")
 
-    # Define only fields needed by workflow
-    ALLOWED_ITEM_FIELDS = { "id", "doc_type", "document_url", "document_id", "declared_data"}
+    # 2️⃣ Resolve task queue
+    task_queue = TASK_QUEUE_MAP.get(workflow_name)
+    if not task_queue:
+        raise HTTPException(400, f"No task queue configured for {workflow_name}")
+
+    # 3️⃣ Fetch items
+    items = db.get_items_by_header(header["id"])
+    if not items:
+        raise HTTPException(400, "No items found for processing")
+
+    # 4️⃣ Normalize items (CRITICAL FIX)
     clean_items = []
     for item in items:
-        clean_item = {k: v for k, v in item.items() if k in ALLOWED_ITEM_FIELDS}
-        clean_items.append(clean_item)
+        document_url = item.get("document_url")
 
-    # 3️⃣ Construct workflow input
+        if not document_url:
+            raise HTTPException(400, "Missing document_url")
+
+        clean_items.append({
+            "item_id": item.get("id"),  # ✅ normalized
+            "doc_type": item.get("doc_type") or "invoice",
+            "input_parameters": {
+                "document_url": document_url
+            },
+            "declared_data": item.get("declared_data", {})
+        })
+
+    # 5️⃣ Construct workflow input
     workflow_input = {
         "reference_id": header.get("reference_id"),
         "header_id": header.get("id"),
-        "workflow_type": header.get("workflow_type"),
+        "workflow_type": workflow_name,
         "process_name": header.get("process_name"),
         "process_group": header.get("process_group"),
+        "domain": "FINANCE",  # can be dynamic later
         "declared_data": header.get("declared_data"),
         "additional_data": header.get("additional_data"),
         "items": clean_items
     }
 
-    # 4️⃣ Generate a unique workflow ID
-    workflow_id = f"{header.get('process_name','AI_PROCESS')}-{header.get('reference_id')}-{uuid.uuid4().hex[:8]}"
+    # 6️⃣ Idempotent workflow ID (IMPORTANT)
+    workflow_id = f"{header.get('reference_id')}"
 
-    # 5️⃣ Start workflow
-    print("workflow start input payload - \n ",workflow_input)
+    print("🚀 Workflow Input:\n", workflow_input)
+
+    # 7️⃣ Start workflow
     client = await get_client()
+
     try:
         await client.start_workflow(
-            header.get("workflow_type"),
-            args=[workflow_input],  # pass dynamic payload
+            workflow_name,          # ✅ direct (no mapping)
+            args=[workflow_input],
             id=workflow_id,
-            task_queue=DEFAULT_TASK_QUEUE
+            task_queue=task_queue   # ✅ mapped queue
         )
-        return {"workflow_id": workflow_id, "status": "started"}
+
+        return {
+            "workflow_id": workflow_id,
+            "task_queue": task_queue,
+            "status": "started"
+        }
+
     except Exception as e:
         raise HTTPException(500, f"Failed to start workflow: {e}")
     
@@ -613,15 +648,15 @@ async def send_signal(req: WorkflowSignalRequest):
     """ Send a signal to a running workflow APPROVED or REJECTED.
     ```json
     {
-    "workflow_id": "AI_DOC_Workflow-xxxxxxxx",
+    "workflow_id": "INV-20260407-C8725B",
     "signal_name": "manual_approval",
     "signal_input": {
         "decision": "APPROVED",
-        "user_id": "manager_001",
-        "comments": "Document verified, ready to onboard"
+        "user_id": "Sid",
+        "comments": "Invoice Document verified, ready to process"
     },
-    "task_queue": "default-task-queue"
-    }    
+    "task_queue": "finance-invoice-queue"
+    }   
     """
     client = await get_client()
     try:

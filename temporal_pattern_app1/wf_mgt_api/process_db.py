@@ -251,9 +251,7 @@ def list_workflows(status=None, start_date=None, end_date=None):
 def list_approval_tasks():
     """Fetch all approval tasks."""
     query = """
-        SELECT approval_task_id, workflow_id, task_name, task_type,
-               assigned_role, assigned_to, status, decision, business_key,
-               priority, sla_deadline, escalated, created_at, completed_at
+        SELECT *
         FROM workflow_approval_task
     """
     with pool.connection() as conn, conn.cursor() as cur:

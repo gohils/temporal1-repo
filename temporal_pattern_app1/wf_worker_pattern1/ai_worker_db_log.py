@@ -70,10 +70,7 @@ def upsert_workflow_instance(
     parent_workflow: Optional[str] = None,
     workflow_group: Optional[str] = None
 ):
-    """Insert or update a workflow instance record with input_data and document_id"""
-    if end_time is None and status in ("COMPLETED", "FAILED"):
-        end_time = datetime.utcnow()    
-
+    """Insert or update workflow instance with proper start/end time handling"""
     try:
         query = """
         INSERT INTO workflow_instance(
@@ -85,8 +82,10 @@ def upsert_workflow_instance(
             parent_workflow,
             workflow_group,
             reference_id,
-            header_id
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            header_id,
+            start_time,
+            end_time
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s)
         ON CONFLICT (workflow_id) DO UPDATE
         SET status = EXCLUDED.status,
             input_data = EXCLUDED.input_data,
@@ -95,6 +94,7 @@ def upsert_workflow_instance(
             workflow_group = EXCLUDED.workflow_group,
             reference_id = EXCLUDED.reference_id,
             header_id = EXCLUDED.header_id,
+            end_time = COALESCE(EXCLUDED.end_time, workflow_instance.end_time),
             updated_at = NOW()
         """
         values = (
@@ -105,8 +105,9 @@ def upsert_workflow_instance(
             domain,
             parent_workflow,
             workflow_group,
-            reference_id,   # reference_id (optional for now)
-            header_id    # header_id (optional for now)
+            reference_id,
+            header_id,
+            end_time
         )
         with pool.connection() as conn:
             with conn.cursor() as cur:
@@ -249,69 +250,74 @@ def log_activity(display_name: str, activity_type: str = "SystemIntegration", ac
     return decorator
 
 # ------------------------------------------------
-# Append Approval Signal (Immutable Log)
+# Upsert Approval Signal (Immutable Log)
 # ------------------------------------------------
-VALID_STATUS = {
-    "PENDING", "IN_PROGRESS", "COMPLETED",
-    "REJECTED", "CANCELLED", "EXPIRED"
-}
-
-VALID_DECISION = {
-    "APPROVED", "REJECTED",
-    "AUTO_APPROVED", "MANUAL_APPROVED", "MANUAL_REJECTED",
-    None
-}
-
 def log_approval_signal(
-    workflow_id, workflow_type, task_name, task_type, approval_signal_name=None,
-    assigned_role=None, action_by=None,
-    status="PENDING", decision=None,
-    comments=None, business_key=None, priority="MEDIUM",
-    workflow_step=1, sla_deadline=None, escalated=False,
-    additional_data=None, attachments=None, completed_at=None,header_id=None, item_id=None
+workflow_id, workflow_type, task_name,task_type=None,approval_signal_name=None,
+assigned_role=None, assigned_to=None, action_by=None, status="PENDING", status_reason=None,
+decision=None, comments=None, reference_id=None, priority="MEDIUM",
+sla_deadline=None, sla_breached=False,  additional_data=None,
+task_approval_summary=None, signal_payload=None,
+signal_received_at=None, completed_at=None, header_id=None, item_id=None
 ):
-    if status not in {"PENDING","IN_PROGRESS","COMPLETED","REJECTED","CANCELLED","EXPIRED"}:
-        raise ValueError("Invalid status")
-    if decision not in {"APPROVED","REJECTED","AUTO_APPROVED","MANUAL_APPROVED","MANUAL_REJECTED",None}:
-        raise ValueError("Invalid decision")
-
+    """
+    Upsert human-in-the-loop approval task for Temporal workflows.
+    Supports automated and manual approval signals, SLA, and task summary.
+    Updates existing record if present, otherwise inserts a new one.
+    """
     now = datetime.now(timezone.utc)
-    if not completed_at and status in ("COMPLETED","REJECTED"):
+    if not completed_at and status in ("COMPLETED", "REJECTED"):
         completed_at = now
 
     try:
         with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                "UPDATE workflow_approval_task SET is_current=FALSE "
-                "WHERE workflow_id=%s AND workflow_step=%s AND is_current=TRUE",
-                (workflow_id, workflow_step)
-            )
-
+            # UPSERT logic
             cur.execute("""
                 INSERT INTO workflow_approval_task(
-                    workflow_id, workflow_type, header_id, item_id, task_name, task_type, approval_signal_name,
-                    assigned_role, action_by,
-                    status, decision, comments,
-                    business_key, priority,
-                    workflow_step, sla_deadline, escalated,
-                    additional_data, attachments,
-                    created_at, completed_at, is_current
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+                    workflow_id, workflow_type, header_id, item_id, reference_id,
+                    task_name, task_type, approval_signal_name, assigned_role, assigned_to, action_by,
+                    status, decision, status_reason, comments, priority,
+                    sla_deadline, sla_breached, additional_data,
+                    task_approval_summary, signal_payload, signal_received_at,
+                    completed_at, updated_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (workflow_id, item_id, task_name) 
+                DO UPDATE SET
+                    workflow_type = EXCLUDED.workflow_type,
+                    header_id = EXCLUDED.header_id,
+                    reference_id = EXCLUDED.reference_id,
+                    approval_signal_name = EXCLUDED.approval_signal_name,
+                    assigned_role = EXCLUDED.assigned_role,
+                    assigned_to = EXCLUDED.assigned_to,
+                    action_by = EXCLUDED.action_by,
+                    status = EXCLUDED.status,
+                    decision = EXCLUDED.decision,
+                    status_reason = EXCLUDED.status_reason,
+                    comments = EXCLUDED.comments,
+                    priority = EXCLUDED.priority,
+                    sla_deadline = EXCLUDED.sla_deadline,
+                    sla_breached = EXCLUDED.sla_breached,
+                    task_approval_summary = EXCLUDED.task_approval_summary,
+                    additional_data = EXCLUDED.additional_data,
+                    signal_payload = EXCLUDED.signal_payload,
+                    signal_received_at = EXCLUDED.signal_received_at,
+                    completed_at = EXCLUDED.completed_at,
+                    updated_at = NOW()
             """, (
-                workflow_id, workflow_type, header_id, item_id, task_name, task_type, approval_signal_name,
-                assigned_role, action_by,
-                status, decision, comments,
-                business_key, priority,
-                workflow_step, sla_deadline, escalated,
+                workflow_id, workflow_type, header_id, item_id, reference_id,
+                task_name, task_type, approval_signal_name, assigned_role, assigned_to, action_by,
+                status, decision, status_reason, comments, priority,
+                sla_deadline, sla_breached, 
                 json.dumps(additional_data) if additional_data else None,
-                json.dumps(attachments) if attachments else None,
-                now, completed_at
+                json.dumps(task_approval_summary) if task_approval_summary else None,
+                json.dumps(signal_payload) if signal_payload else None,
+                signal_received_at,
+                completed_at, now
             ))
             conn.commit()
     except Exception as e:
-        print("❌ Approval log failed:", e)
+        print("❌ Approval upsert failed:", e)
         raise
-
 # ------------------------------------------------
 # Append OCR Result - New function to store OCR results in a separate table
 # ------------------------------------------------

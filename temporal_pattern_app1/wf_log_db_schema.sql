@@ -66,13 +66,19 @@ CREATE TABLE IF NOT EXISTS workflow_approval_task (
     approval_task_id BIGSERIAL PRIMARY KEY,
 
     -- Core workflow linkage
-    header_id BIGINT,                    -- Link to automation_process_header
-    item_id BIGINT,                    -- Link to automation_process_header_item (optional, for document-level tasks)
     workflow_id TEXT NOT NULL,
     workflow_type TEXT,
-    task_name TEXT NOT NULL,              -- Display name (UI)
-    task_type TEXT NOT NULL,              -- Machine classification
+    header_id BIGINT,                    -- Link to automation_process_header
+    item_id BIGINT,                    -- Link to automation_process_header_item (optional, for document-level tasks)
+    -- Business context
+    reference_id TEXT,                    -- invoice_id / customer_id
+    priority TEXT DEFAULT 'MEDIUM',
+    
+    -- Task identity
+    task_name TEXT NOT NULL,              -- e.g., "Invoice Approval", "KYC Review"
+    task_type TEXT ,              -- Display name (UI)
     approval_signal_name TEXT,            -- for event-based triggers
+    task_approval_summary JSONB,          -- brief context for approver (e.g., invoice total, customer name)
 
     -- Assignment
     assigned_role TEXT,
@@ -81,29 +87,27 @@ CREATE TABLE IF NOT EXISTS workflow_approval_task (
     -- State
     status TEXT NOT NULL,                 -- PENDING, COMPLETED, REJECTED, etc.
     decision TEXT,                        -- APPROVED / REJECTED / AUTO_APPROVED
+    status_reason TEXT,
 
-    -- Workflow control
-    workflow_step INT DEFAULT 1,
-    is_current BOOLEAN DEFAULT TRUE,      -- only 1 active task per workflow/step
-
-    -- Business context
-    business_key TEXT,                    -- invoice_id / customer_id
-    priority TEXT DEFAULT 'MEDIUM',
+    is_current BOOLEAN DEFAULT TRUE,      -- only 1 active 
 
     -- SLA & escalation
     sla_deadline TIMESTAMP,
-    escalated BOOLEAN DEFAULT FALSE,
+    sla_breached BOOLEAN DEFAULT FALSE,
 
-    -- UI / extensibility
-    additional_data JSONB,
-    attachments JSONB,
-
+    -- Temporal signal tracking
+    signal_payload JSONB,
+    signal_received_at TIMESTAMP,
+    additional_data JSONB,              -- for extensibility (e.g., escalation history, reminder count)
     -- Audit
     comments TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
-    completed_at TIMESTAMP
-);
+    completed_at TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT NOW(),
 
+    -- Unique for UPSERT
+    CONSTRAINT workflow_task_unique UNIQUE(workflow_id, item_id, task_name)
+);
 
 -- =========================================================
 -- 4. OCR DATA (Document ingestion layer)
