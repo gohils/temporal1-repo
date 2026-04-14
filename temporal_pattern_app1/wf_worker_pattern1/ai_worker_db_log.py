@@ -119,131 +119,181 @@ def upsert_workflow_instance(
 # ------------------------------------------------
 # Upsert activity Instance
 # ------------------------------------------------
+def build_activity_values(log):
+    return (
+        log.get("activity_id"),
+        log.get("workflow_id"),
+        log.get("execution_run_id"),
+        log.get("node_instance_id"),
+        log.get("parent_activity_id"),
+        log.get("execution_path_id"),
+        log.get("child_workflow_id"),
+        log.get("header_id"),
+        log.get("item_id"),
+        log.get("step_key"),
+        log.get("display_name"),
+        log.get("node_id"),
+        log.get("prev_node_id"),
+        log.get("branch_id"),
+        log.get("attempt", 1),
+        log.get("workflow_type"),
+        log.get("task_name"),
+        log.get("activity_type"),
+        log.get("activity_group"),
+        log.get("status"),
+        log.get("status_reason"),   # ✅ FIX ADDED
+        json.dumps(to_serializable(log.get("input_data"))),
+        json.dumps(to_serializable(log.get("output_data"))),
+        json.dumps(to_serializable(log.get("input_context"))),
+        log.get("start_time"),
+        log.get("end_time"),
+        log.get("duration_ms"),
+    )
+
 def upsert_activity_event(log: Dict[str, Any]):
+
+    record_values = build_activity_values(log)
+
     try:
         query = """
         INSERT INTO workflow_activity_instance(
-            activity_id,
-            workflow_id, child_workflow_id, header_id, item_id, step_key, display_name, workflow_type, task_name, activity_type, activity_group, status,
-            input_data, output_data, input_context, start_time, end_time
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            activity_id, workflow_id, execution_run_id,
+            node_instance_id, parent_activity_id, execution_path_id,
+            child_workflow_id, header_id, item_id,
+            step_key, display_name,
+            node_id, prev_node_id, branch_id,
+            attempt,
+            workflow_type, task_name, activity_type, activity_group,
+            status, status_reason,
+            input_data, output_data, input_context,
+            start_time, end_time, duration_ms
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (activity_id) DO UPDATE
-        SET status = EXCLUDED.status,
-            output_data = EXCLUDED.output_data,
-            end_time = EXCLUDED.end_time
+        SET status=EXCLUDED.status, status_reason=EXCLUDED.status_reason,
+            output_data=EXCLUDED.output_data, input_context=EXCLUDED.input_context,
+            end_time=EXCLUDED.end_time, duration_ms=EXCLUDED.duration_ms
         """
-        values = (
-            log.get("activity_id"),
-            log.get("workflow_id"), 
-            log.get("child_workflow_id"),
-            log.get("header_id"),
-            log.get("item_id"),
-            log.get("step_key"),
-            log.get("display_name"),
-            log.get("workflow_type"),
-            log.get("task_name"),
-            log.get("activity_type"),
-            log.get("activity_group"),
-            log.get("status"),
-            json.dumps(to_serializable(log.get("input_data"))) if log.get("input_data") else None,
-            json.dumps(to_serializable(log.get("output_data"))) if log.get("output_data") else None,
-            json.dumps(to_serializable(log.get("input_context"))) if log.get("input_context") else None,
-            log.get("start_time"),
-            log.get("end_time"),
-        )
+
+        # print(f"====== VALUES COUNT: {len(record_values)}", record_values)
+        # print("======== QUERY PLACEHOLDERS:", query.count("%s"))
+
         with pool.connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(query, values)
+                cur.execute(query, record_values)
             conn.commit()
+
     except Exception as e:
         print("❌ DB logging failed:", e)
-
+        
 # ------------------------------------------------
 # Decorator: log_activity
 # ------------------------------------------------
-def log_activity(display_name: str, activity_type: str = "SystemIntegration", activity_group: Optional[str] = None):
+def log_activity(display_name: str,  activity_type: str = "SystemIntegration", activity_group: Optional[str] = None):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            input_obj = args[0] if args else None
 
-            # Extract context and payload safely
+            input_obj = args[0] if args else None
             ctx = getattr(input_obj, "context", {}) or {}
             payload = getattr(input_obj, "payload", {}) or {}
 
-            workflow_id = ctx.get("workflow_id", "UNKNOWN")
-            workflow_type = ctx.get("workflow_type", "UNKNOWN")
-            child_workflow_id = ctx.get("child_workflow_id")
-            header_id = ctx.get("header_id")
-            item_id = ctx.get("item_id")
-            step_key = payload.get("step_key") \
-                        or f"{display_name.upper()}_{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}"
-            activity_id = str(uuid.uuid4())  # 🔥 UNIQUE PER EXECUTION
+            wf_id = ctx.get("workflow_id", "UNKNOWN")
+            wf_type = ctx.get("workflow_type", "UNKNOWN")
+
+            run_id = ctx.get("execution_run_id") or wf_id
+
             start_time = datetime.utcnow()
 
-            # START → INSERT
-            upsert_activity_event({
+            # -----------------------------
+            # GRAPH STATE (already prepared by workflow engine)
+            # -----------------------------
+            node_id = ctx.get("current_node_id") or display_name
+            prev_node_id = ctx.get("prev_node_id")
+            branch_id = ctx.get("branch_id", "MAIN")
+            execution_path_id = ctx.get("execution_path_id") or branch_id
+
+            activity_id = str(uuid.uuid4())
+            node_instance_id = str(uuid.uuid4())
+
+            base_event = {
                 "activity_id": activity_id,
-                "workflow_id": workflow_id,
-                "child_workflow_id": child_workflow_id,
-                "header_id": header_id,
-                "item_id": item_id,
-                "step_key": step_key,
-                "workflow_type": workflow_type,
+                "workflow_id": wf_id,
+                "execution_run_id": run_id,
+
+                "node_instance_id": node_instance_id,
+                "parent_activity_id": ctx.get("parent_activity_id"),
+
+                "execution_path_id": execution_path_id,
+
+                "child_workflow_id": ctx.get("child_workflow_id"),
+                "header_id": ctx.get("header_id"),
+                "item_id": ctx.get("item_id"),
+
+                "step_key": display_name,
                 "display_name": display_name,
+
+                # ✅ CRITICAL FOR REACTFLOW EDGE LIGHTING
+                "node_id": node_id,
+                "prev_node_id": prev_node_id,
+                "branch_id": branch_id,
+
+                "attempt": 1,
+
+                "workflow_type": wf_type,
+                "task_name": func.__name__,
                 "activity_type": activity_type,
-                "status": "STARTED",
-                "input_data": payload,
+                "activity_group": activity_group,
+
                 "input_context": ctx,
-                "start_time": start_time,
-                "activity_group": activity_group
+                "start_time": start_time
+            }
+
+            # -----------------------------
+            # START EVENT
+            # -----------------------------
+            upsert_activity_event({
+                **base_event,
+                "status": "STARTED",
+                "input_data": payload
             })
 
             try:
                 result = await func(*args, **kwargs)
+                end_time = datetime.utcnow()
 
-                # COMPLETE → UPDATE
+                # -----------------------------
+                # SUCCESS EVENT
+                # -----------------------------
                 upsert_activity_event({
-                    "activity_id": activity_id,
-                    "workflow_id": workflow_id,
-                    "child_workflow_id": child_workflow_id,
-                    "header_id": header_id,
-                    "item_id": item_id,
-                    "step_key": step_key,
-                    "workflow_type": workflow_type,
-                    "display_name": display_name,
-                    "activity_type": activity_type,
+                    **base_event,
                     "status": "COMPLETED",
                     "output_data": getattr(result, "response", None),
-                    "end_time": datetime.utcnow()
+                    "end_time": end_time,
+                    "duration_ms": int((end_time - start_time).total_seconds() * 1000)
                 })
 
                 return result
 
             except Exception as e:
-                # FAIL → structured update including key context for debugging
-                fail_data = {
-                    "error": str(e),
-                    "child_workflow_id": child_workflow_id,
-                    "header_id": header_id,
-                    "item_id": item_id,
-                    "payload_snapshot": payload
-                }
+                end_time = datetime.utcnow()
 
+                # -----------------------------
+                # FAILURE EVENT
+                # -----------------------------
                 upsert_activity_event({
-                    "activity_id": activity_id,
-                    "workflow_id": workflow_id,
-                    "child_workflow_id": child_workflow_id,
-                    "header_id": header_id,
-                    "item_id": item_id,
-                    "step_key": step_key,
-                    "workflow_type": workflow_type,
-                    "display_name": display_name,
-                    "activity_type": activity_type,
+                    **base_event,
                     "status": "FAILED",
-                    "output_data": fail_data,
-                    "end_time": datetime.utcnow()
+                    "status_reason": str(e),
+                    "output_data": {
+                        "error": str(e),
+                        "failed_node": node_id,
+                        "prev_node": prev_node_id,
+                        "payload_snapshot": payload
+                    },
+                    "end_time": end_time,
+                    "duration_ms": int((end_time - start_time).total_seconds() * 1000)
                 })
+
                 raise
 
         return wrapper

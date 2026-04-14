@@ -25,8 +25,9 @@ with workflow.unsafe.imports_passed_through():
 
 # Environment configs
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")  # Temporal server host
-TASK_QUEUE = "default-task-queue"  # Task queue
-AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")  # AI endpoint
+TASK_QUEUE = "kyc-onboarding-queue"  # Task queue
+# AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")  # AI endpoint
+AI_API_URL = "http://localhost:8000" 
 
 # -----------------------------
 # Approval logging helper
@@ -55,9 +56,8 @@ def log_wf_approval(
 # -----------------------------
 # Context Management (CORE)
 # -----------------------------
-
 def build_base_context(payload, wf_id):
-    """Build base workflow-level context (never lost)"""
+    # Build initial workflow context
     return {
         "workflow_id": wf_id,
         "workflow_type": payload.get("workflow_type"),
@@ -66,16 +66,57 @@ def build_base_context(payload, wf_id):
     }
 
 def merge_context(parent, child):
-    """Merge context safely while preserving critical fields"""
+    # Merge parent and child context with item fallback
     return {
         **parent,
         **child,
-        "workflow_id": parent.get("workflow_id"),          # enforce root workflow id
-        "workflow_type": parent.get("workflow_type"),      # enforce workflow type
-        "reference_id": parent.get("reference_id"),        # enforce business reference
-        "header_id": parent.get("header_id"),              # enforce header linkage
-        "item_id": child.get("item_id") or parent.get("item_id"),  # allow item override
+        "workflow_id": parent.get("workflow_id"),
+        "workflow_type": parent.get("workflow_type"),
+        "reference_id": parent.get("reference_id"),
+        "header_id": parent.get("header_id"),
+        "item_id": child.get("item_id") or parent.get("item_id"),
+        "doc_type": child.get("doc_type") or parent.get("doc_type"),
+    # IMPORTANT CHANGE (implicit fix):
+    # prev_node_id / current_node_id are NOT allowed to be overwritten by child
     }
+
+# -----------------------------
+# Execution Wrapper
+# -----------------------------
+async def execute_step(activity_fn, payload, context, step, timeout=30):
+
+    # -----------------------------
+    # GRAPH STATE (ONLY PLACE WHERE IT IS UPDATED)
+    # -----------------------------
+    prev_node = context.get("current_node_id")
+
+    context = {
+        **context,
+        "prev_node_id": prev_node,
+        "current_node_id": step,
+        "branch_id": context.get("branch_id")
+    }
+
+    result: ActivityOutput = await workflow.execute_activity(
+        activity_fn,
+        ActivityInput(payload, context),
+        start_to_close_timeout=timedelta(seconds=timeout),
+        retry_policy=RetryPolicy(maximum_attempts=3),
+    )
+
+    payload = {**payload, **result.response}
+
+    # -----------------------------
+    # SAFE MERGE (DO NOT OVERWRITE GRAPH STATE)
+    # -----------------------------
+    business_context = merge_context(context, result.context)
+
+    # preserve graph fields explicitly
+    business_context["prev_node_id"] = context["prev_node_id"]
+    business_context["current_node_id"] = context["current_node_id"]
+    business_context["branch_id"] = context["branch_id"]
+
+    return payload, business_context
 
 # -----------------------------
 # Data Contracts
@@ -94,50 +135,58 @@ class ActivityOutput:
     context: Dict[str, Any]
 
 # -----------------------------
-# Execution Helper
-# -----------------------------
-
-async def execute_step(activity_fn, payload, context, step_key, timeout=30):
-    """Execute activity with retry and merge context safely"""
-    payload = {**payload, "step_key": step_key}  # attach step_key for logging
-
-    result: ActivityOutput = await workflow.execute_activity(
-        activity_fn,
-        ActivityInput(payload, context),
-        start_to_close_timeout=timedelta(seconds=timeout),
-        retry_policy=RetryPolicy(maximum_attempts=3),
-    )
-
-    merged_payload = {**payload, **result.response}          # merge payload safely
-    merged_context = merge_context(context, result.context)  # merge context safely
-
-    return merged_payload, merged_context
-
-# -----------------------------
 # Activities
 # -----------------------------
 
 @activity.defn
 @log_activity(display_name="01_PREPROCESS", activity_group="SYSTEM")
 async def pre_process_documents(input: ActivityInput) -> ActivityOutput:
-    """Preprocess and normalize incoming documents"""
-    params = input.payload or {}  # incoming request payload
-    documents = params.get("items", [])  # extract document list
+    """Preprocess and normalize incoming documents (lossless version)"""
+
+    # print("📄 [PREPROCESS] Starting preprocessing", input.payload, input.context)
+
+    params = input.payload or {}
+    documents = params.get("items", [])
 
     if not documents:
-        raise ValueError("Missing documents")  # fail fast if no docs
+        raise ValueError("Missing documents")
 
-    normalized_docs = [
-        {
-            "doc_id": str(uuid.uuid4())[:8],  # generate internal doc id
-            "declared_doc_type": doc.get("declared_data", {}).get("document_type"),
-            "document_url": doc.get("document_url"),
-            "item_id": doc.get("id"),  # preserve DB item id
+    normalized_docs = []
+
+    for doc in documents:
+
+        # -----------------------------
+        # SAFE EXTRACTION (NO LOSS)
+        # -----------------------------
+        input_params = doc.get("input_parameters", {}) or {}
+        declared_data = doc.get("declared_data", {}) or {}
+
+        normalized_doc = {
+            # keep original identity
+            "item_id": doc.get("item_id"),  # FIXED (was doc.get("id"))
+
+            # preserve full traceability
+            "doc_id": str(uuid.uuid4())[:8],
+
+            # business metadata
+            "declared_doc_type": declared_data.get("document_type") or doc.get("doc_type"),
+
+            # CRITICAL FIELD (FIXED PATH)
+            "document_url": input_params.get("document_url"),
+
+            # keep original structure for downstream safety
+            "raw": doc,
         }
-        for doc in documents
-    ]
 
-    # Persist workflow start
+        # validation guard (fail early, not downstream)
+        if not normalized_doc["document_url"]:
+            raise ValueError(f"Missing document_url for item_id={normalized_doc['item_id']}")
+
+        normalized_docs.append(normalized_doc)
+
+    # -----------------------------
+    # PERSIST WORKFLOW START
+    # -----------------------------
     upsert_workflow_instance(
         workflow_id=input.context["workflow_id"],
         workflow_type=input.context["workflow_type"],
@@ -147,16 +196,30 @@ async def pre_process_documents(input: ActivityInput) -> ActivityOutput:
         reference_id=params.get("reference_id"),
     )
 
-    return ActivityOutput({"normalized_documents": normalized_docs}, {})  # return docs
+    # -----------------------------
+    # RETURN LOSSLESS CONTRACT
+    # -----------------------------
+    return ActivityOutput(
+        {
+            "normalized_documents": normalized_docs,
+            # optional convenience alias (safe for old consumers)
+            "items_count": len(normalized_docs),
+        },
+        {
+            "preprocessed_at": str(datetime.utcnow()),
+        },
+    )
 
 @activity.defn
 @log_activity(display_name="02_CLASSIFY", activity_group="AI")
 async def ai_classify_document(input: ActivityInput) -> ActivityOutput:
     """Classify document type via AI service"""
+    # print("📄 [AI_CLASSIFY] Starting document classification", input.payload, input.context)
+
     async with httpx.AsyncClient(timeout=30) as client:
         result = (await client.get(
-            f"{AI_API_URL}/classify_document/default",
-            params={"input_doc_url": input.payload["document_url"]},
+            f"{AI_API_URL}/ai_doc/classify_document",
+            params={"url": input.payload["document_url"]},
         )).json()
 
     return ActivityOutput(
@@ -171,6 +234,7 @@ async def ai_classify_document(input: ActivityInput) -> ActivityOutput:
 @log_activity(display_name="03_OCR", activity_group="AI")
 async def ai_process_doc(input: ActivityInput) -> ActivityOutput:
     """Perform OCR on document using AI service"""
+    # print("📄 [AI_OCR] Starting OCR processing", input.payload, input.context)
     doc_url = input.payload.get("document_url")
     doc_type = input.payload.get("doc_type", "generic_document")
 
@@ -183,8 +247,8 @@ async def ai_process_doc(input: ActivityInput) -> ActivityOutput:
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
-            f"{AI_API_URL}/{model_name}/default",
-            params={"input_doc_url": doc_url},
+            f"{AI_API_URL}/ai_doc/{model_name}",
+            params={"url": doc_url},
         )
         resp.raise_for_status()
         ocr_data = resp.json()
@@ -268,7 +332,7 @@ async def approval_decision(input: ActivityInput) -> ActivityOutput:
     wf_type = input.context.get("workflow_type")
     header_id = input.context.get("header_id")
 
-    decision = "AUTO_APPROVED" if input.payload.get("status") == "valid" else "manual_review"
+    decision = "AUTO_APPROVED" if input.payload.get("status", "").upper() == "VALID" else "REVIEW"
 
     if decision == "AUTO_APPROVED":
         log_wf_approval(
@@ -355,9 +419,18 @@ class CustomerOnboardingWorkflow:
         child_handles = []
         for i, doc in enumerate(docs):
             child_id = f"{wf_id}_{doc.get('declared_doc_type')}_{i}"  # unique child id
+
             child_context = merge_context(
                 context,
-                {"doc_type": doc.get("declared_doc_type"), "item_id": doc.get("item_id"), "child_workflow_id": child_id},
+                {
+                    "doc_type": doc.get("declared_doc_type"),
+                    "item_id": doc.get("item_id"),
+                    "child_workflow_id": child_id,
+                    "parent_workflow_id": wf_id,
+                    "branch_id": f"DOC_{i}",
+                    "execution_path_id": f"{wf_id}:DOC_{i}",
+                    "fanout_group_id": f"{wf_id}:01_PREPROCESS",
+                },
             )
             handle = workflow.execute_child_workflow(
                 DocumentWorkflow.run,

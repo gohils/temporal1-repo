@@ -193,11 +193,19 @@ def list_process_headers(
 ):
     """Fetch all process headers with optional filters"""
     base_query = """
-        SELECT id, reference_id, workflow_type, process_name, process_group,
-               declared_data, verification_status, verification_comments,
-               verification_data, additional_header_data,
-               created_at, updated_at
-        FROM automation_process_header
+        SELECT h.id, h.reference_id, h.workflow_type, h.process_name, h.process_group,
+            h.declared_data, h.verification_status, h.verification_comments,
+            h.verification_data, h.additional_header_data,
+            h.created_at, h.updated_at,
+            wfi.workflow_id, wfi.status
+        FROM automation_process_header h
+        LEFT JOIN LATERAL (
+            SELECT workflow_id, status
+            FROM workflow_instance w
+            WHERE w.reference_id = h.reference_id
+            ORDER BY w.created_at DESC
+            LIMIT 1
+        ) wfi ON true
         WHERE 1=1
     """
     params = []

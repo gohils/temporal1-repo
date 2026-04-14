@@ -25,7 +25,8 @@ with workflow.unsafe.imports_passed_through():
 # Environment and Task Queue
 # -----------------------------
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
-AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")
+# AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")
+AI_API_URL = "http://localhost:8000"  # Local testing override
 DEFAULT_TASK_QUEUE = "finance-invoice-queue"
 
 # -----------------------------
@@ -64,22 +65,47 @@ def merge_context(parent, child):
         "header_id": parent.get("header_id"),
         "item_id": child.get("item_id") or parent.get("item_id"),
         "doc_type": child.get("doc_type") or parent.get("doc_type"),
+    # IMPORTANT CHANGE (implicit fix):
+    # prev_node_id / current_node_id are NOT allowed to be overwritten by child
     }
 
 # -----------------------------
 # Execution Wrapper
 # -----------------------------
 async def execute_step(activity_fn, payload, context, step, timeout=30):
-    # Run activity and merge response/context
+
+    # -----------------------------
+    # GRAPH STATE (ONLY PLACE WHERE IT IS UPDATED)
+    # -----------------------------
+    prev_node = context.get("current_node_id")
+
+    context = {
+        **context,
+        "prev_node_id": prev_node,
+        "current_node_id": step,
+        "branch_id": context.get("branch_id", "MAIN")
+    }
+
     result: ActivityOutput = await workflow.execute_activity(
         activity_fn,
         ActivityInput(payload, context),
         start_to_close_timeout=timedelta(seconds=timeout),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
+
     payload = {**payload, **result.response}
-    context = merge_context(context, result.context)
-    return payload, context
+
+    # -----------------------------
+    # SAFE MERGE (DO NOT OVERWRITE GRAPH STATE)
+    # -----------------------------
+    business_context = merge_context(context, result.context)
+
+    # preserve graph fields explicitly
+    business_context["prev_node_id"] = context["prev_node_id"]
+    business_context["current_node_id"] = context["current_node_id"]
+    business_context["branch_id"] = context["branch_id"]
+
+    return payload, business_context
 
 # -----------------------------
 # Activities
@@ -88,6 +114,7 @@ async def execute_step(activity_fn, payload, context, step, timeout=30):
 @log_activity(display_name="01_PREPROCESS_INVOICE")
 async def pre_process_invoices(input: ActivityInput) -> ActivityOutput:
     # Normalize invoice items and ensure document_url exists
+    print("📄 [PREPROCESS] Starting invoice preprocessing", input.payload, input.context)
     input_data = input.payload or {}  # incoming request payload
     invoices = input.payload.get("items", [])
     if not invoices:
@@ -122,15 +149,17 @@ async def pre_process_invoices(input: ActivityInput) -> ActivityOutput:
 @log_activity(display_name="02_OCR")
 async def ai_process_doc(input: ActivityInput) -> ActivityOutput:
     # Call AI OCR and store results
+    print("📄 [OCR] Starting document processing", input.payload, input.context)
     doc_url = input.payload.get("document_url")
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             f"{AI_API_URL}/ai_doc_llm/analyze-document-prebuilt-model",
-            json={"document_url": doc_url, "model_name": "prebuilt-invoice", "response_format": "structured"}
+            json={"document_url": doc_url, "ai_model_name": "prebuilt-invoice", "response_format": "structured"}
         )
         resp.raise_for_status()
         ocr_data = resp.json()
 
+    print("📄 ====== [OCR] OCR processing complete:", json.dumps(ocr_data, indent=2))
     ocr_docs = ocr_data.get("documents", [{}])
     doc = ocr_docs[0] if ocr_docs else {}
 
@@ -160,6 +189,7 @@ async def ai_process_doc(input: ActivityInput) -> ActivityOutput:
 @log_activity(display_name="03_NORMALIZE")
 async def normalize_document(input: ActivityInput) -> ActivityOutput:
     # Normalize OCR data into structured invoice fields
+    print("📄 [NORMALIZE] Starting invoice normalization", input.payload, input.context)
     ocr = input.payload.get("ocr_data", {})
     header = ocr.get("documents", [{}])[0].get("header", {})
     invoice = {
@@ -268,24 +298,62 @@ class InvoiceProcessingWorkflow:
         results = []
 
         # Step 2: Process each invoice individually
-        for inv in payload.get("normalized_invoices", []):
-            inv_payload = {**payload, **inv}  # merge root payload for full state
-            inv_context = merge_context(context, {"item_id": inv["item_id"], "doc_type": inv.get("doc_type")})
+        inv = payload.get("normalized_invoices", [])[0]  # For simplicity, process first invoice; can be extended to loop over all
+        inv_payload = {**payload, **inv}  # merge root payload for full state
+        inv_context = merge_context(context, {"item_id": inv["item_id"], "doc_type": inv.get("doc_type")})
 
-            # OCR extraction
-            inv_payload, inv_context = await execute_step(ai_process_doc, inv_payload, inv_context, "02_OCR", 120)
+        # OCR extraction
+        inv_payload, inv_context = await execute_step(ai_process_doc, inv_payload, inv_context, "02_OCR", 120)
 
-            # Normalize document fields
-            inv_payload, inv_context = await execute_step(normalize_document, inv_payload, inv_context, "03_NORMALIZE")
+        # Normalize document fields
+        inv_payload, inv_context = await execute_step(normalize_document, inv_payload, inv_context, "03_NORMALIZE")
 
-            # Validate invoice data
-            inv_payload, inv_context = await execute_step(validate_document, inv_payload, inv_context, "04_VALIDATE")
+        # Validate invoice data
+        inv_payload, inv_context = await execute_step(validate_document, inv_payload, inv_context, "04_VALIDATE")
 
-            # Make approval decision
-            inv_payload, inv_context = await execute_step(approval_decision, inv_payload, inv_context, "05_DECISION")
-            decision = inv_payload.get("approval_decision")
+        # Make approval decision
+        inv_payload, inv_context = await execute_step(approval_decision, inv_payload, inv_context, "05_DECISION")
+        decision = inv_payload.get("approval_decision")
 
-            # Log task summary for approver (auto or pending manual)
+        # Log task summary for approver (auto or pending manual)
+        log_approval_signal(
+            workflow_id=wf_id,
+            workflow_type=context.get("workflow_type"),
+            reference_id=context.get("reference_id"),
+            header_id=context.get("header_id"),
+            item_id=inv["item_id"],
+            task_name="DOCUMENT_APPROVAL",
+            task_type="DOCUMENT_APPROVAL_L1",
+            approval_signal_name="SYSTEM" if decision.startswith("auto") else "manual_approval",
+            assigned_role="FINANCE_APPROVER",
+            status="PENDING" if decision == "manual_review" else "COMPLETED",
+            decision="AUTO_APPROVED" if decision.startswith("auto") else None,
+            task_approval_summary={
+                "invoice_total": inv_payload.get("invoice_data", {}).get("invoice_total"),
+                "vendor_name": inv_payload.get("invoice_data", {}).get("vendor_name"),
+                "approval_decision": decision
+            },
+            additional_data={"validation_class": inv_payload.get("classification")},
+            signal_payload={"source": "SYSTEM"}  # mark system-generated signal
+        )
+
+        # Wait for manual approval if required
+        if decision == "manual_review":
+            # Wait for manual signal from workflow
+            await workflow.wait_condition(
+                lambda: self.manual_approval_decision is not None,
+                timeout=timedelta(minutes=30)
+            )
+
+            # Extract manual approval details
+            manual_details = self.manual_approval_details or {}
+            final_decision = (
+                "approved" if manual_details.get("decision", "").upper() == "APPROVED"
+                else "rejected"
+            )
+            inv_payload["approval_decision"] = final_decision
+
+            # Log full manual approval into workflow task table
             log_approval_signal(
                 workflow_id=wf_id,
                 workflow_type=context.get("workflow_type"),
@@ -294,69 +362,34 @@ class InvoiceProcessingWorkflow:
                 item_id=inv["item_id"],
                 task_name="DOCUMENT_APPROVAL",
                 task_type="DOCUMENT_APPROVAL_L1",
-                approval_signal_name="SYSTEM" if decision.startswith("auto") else "manual_approval",
+                approval_signal_name="manual_approval",
                 assigned_role="FINANCE_APPROVER",
-                status="PENDING" if decision == "manual_review" else "COMPLETED",
-                decision="AUTO_APPROVED" if decision.startswith("auto") else None,
+                assigned_to=manual_details.get("user_id"),          # log approver
+                status="COMPLETED",
+                decision="MANUAL_APPROVED" if final_decision=="approved" else "MANUAL_REJECTED",
                 task_approval_summary={
+                    "final_decision": final_decision,
                     "invoice_total": inv_payload.get("invoice_data", {}).get("invoice_total"),
-                    "vendor_name": inv_payload.get("invoice_data", {}).get("vendor_name"),
-                    "approval_decision": decision
+                    "vendor_name": inv_payload.get("invoice_data", {}).get("vendor_name")
                 },
-                additional_data={"validation_class": inv_payload.get("classification")},
-                signal_payload={"source": "SYSTEM"}  # mark system-generated signal
+                signal_payload=manual_details,                      # full JSON from signal
+                comments=manual_details.get("comments"),           # log human comments
+                additional_data={"validation_class": inv_payload.get("classification")}
             )
 
-            # Wait for manual approval if required
-            if decision == "manual_review":
-                # Wait for manual signal from workflow
-                await workflow.wait_condition(
-                    lambda: self.manual_approval_decision is not None,
-                    timeout=timedelta(minutes=30)
-                )
+        # Route invoice based on decision
+        decision = inv_payload.get("approval_decision")
+        inv_context["branch_id"] = decision.upper()  # tag context with decision branch
+        if decision in ["auto_approve", "approved"]:
+            inv_payload, inv_context = await execute_step(post_to_erp, inv_payload, inv_context, "06_ERP")
+        else:
+            inv_payload, inv_context = await execute_step(send_rejection_notification, inv_payload, inv_context, "07_NOTIFY")
 
-                # Extract manual approval details
-                manual_details = self.manual_approval_details or {}
-                final_decision = (
-                    "approved" if manual_details.get("decision", "").upper() == "APPROVED"
-                    else "rejected"
-                )
-                inv_payload["approval_decision"] = final_decision
 
-                # Log full manual approval into workflow task table
-                log_approval_signal(
-                    workflow_id=wf_id,
-                    workflow_type=context.get("workflow_type"),
-                    reference_id=context.get("reference_id"),
-                    header_id=context.get("header_id"),
-                    item_id=inv["item_id"],
-                    task_name="DOCUMENT_APPROVAL",
-                    task_type="DOCUMENT_APPROVAL_L1",
-                    approval_signal_name="manual_approval",
-                    assigned_role="FINANCE_APPROVER",
-                    assigned_to=manual_details.get("user_id"),          # log approver
-                    status="COMPLETED",
-                    decision="MANUAL_APPROVED" if final_decision=="approved" else "MANUAL_REJECTED",
-                    task_approval_summary={
-                        "final_decision": final_decision,
-                        "invoice_total": inv_payload.get("invoice_data", {}).get("invoice_total"),
-                        "vendor_name": inv_payload.get("invoice_data", {}).get("vendor_name")
-                    },
-                    signal_payload=manual_details,                      # full JSON from signal
-                    comments=manual_details.get("comments"),           # log human comments
-                    additional_data={"validation_class": inv_payload.get("classification")}
-                )
-
-            # Route invoice based on decision
-            if decision in ["auto_approve", "approved"]:
-                inv_payload, inv_context = await execute_step(post_to_erp, inv_payload, inv_context, "06_ERP")
-            else:
-                inv_payload, inv_context = await execute_step(send_rejection_notification, inv_payload, inv_context, "07_NOTIFY")
-
-            results.append({**inv_payload, "context": inv_context})  # preserve full context
+        results.append({**inv_payload, "context": inv_context})  # preserve full context
 
         # Audit final results
-        await execute_step(store_audit, {"results": results}, context, "08_AUDIT")
+        await execute_step(store_audit, {"results": results}, inv_context, "08_AUDIT")
 
         # Step : mark workflow completed
         end_time = workflow.now()

@@ -18,6 +18,8 @@ import asyncio
 import process_db as db
 from erp_routes import router as erp_router
 from crud_router import router as crud_router
+from ai_doc_router import router as ai_doc_router
+from ai_doc_llm_router import router as ai_doc_llm_router
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -40,6 +42,8 @@ app.add_middleware(
 # Include ERP router
 app.include_router(erp_router)
 app.include_router(crud_router)
+app.include_router(ai_doc_router)
+app.include_router(ai_doc_llm_router)
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
 DEFAULT_TASK_QUEUE = os.getenv("TASK_QUEUE", "default-task-queue")

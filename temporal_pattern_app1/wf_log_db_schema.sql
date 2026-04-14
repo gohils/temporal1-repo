@@ -9,6 +9,8 @@
 CREATE TABLE IF NOT EXISTS workflow_instance (
     workflow_id TEXT PRIMARY KEY,
     workflow_type TEXT NOT NULL,
+    execution_run_id TEXT,
+    workflow_version TEXT,
     status TEXT,
     error_message TEXT,
     error_step TEXT,
@@ -37,25 +39,35 @@ CREATE TABLE IF NOT EXISTS workflow_instance (
 -- =========================================================
 -- 2. ACTIVITY LOG (High-volume logging)
 -- =========================================================
-CREATE TABLE IF NOT EXISTS workflow_activity_instance (
-    activity_id  TEXT PRIMARY KEY,
-    workflow_id TEXT NOT NULL,
-    child_workflow_id TEXT, -- for sub-workflows (optional)
-    header_id TEXT,         -- <-- added for header linkage
-    item_id TEXT,           -- <-- added for item/document linkage
-    step_key TEXT,          -- 01_PREPROCESSING, 02_OCR, 03_VALIDATION, 04_APPROVAL, etc.
-    display_name TEXT,
-    workflow_type TEXT,
-    task_name TEXT,
-    activity_type TEXT,
-    activity_group TEXT,
-    status TEXT,
-    input_data JSONB,
-    output_data JSONB,
-    input_context JSONB,
-    start_time TIMESTAMP,
-    end_time TIMESTAMP,
-    created_at TIMESTAMP DEFAULT NOW()
+CREATE TABLE workflow_activity_instance (
+    activity_id TEXT PRIMARY KEY,         --unique ID for each activity execution record
+    workflow_id TEXT NOT NULL,            --parent workflow instance ID
+    execution_run_id TEXT NOT NULL,       --groups all activities of a single workflow run
+    node_instance_id TEXT,                --unique execution instance of a node (important for retries/parallel runs)
+    parent_activity_id TEXT,              --links child activity to parent (fan-out / fan-in reconstruction)
+    execution_path_id TEXT,               --identifies branch path (e.g., APPROVED / REJECTED / A-B-C)
+    child_workflow_id TEXT,               --sub-workflow ID if this activity spawns nested workflow
+    header_id TEXT,                       --business document/header identifier (invoice batch, etc.)
+    item_id TEXT,                         --per-item/document-level identifier inside workflow
+    step_key TEXT,                        --logical workflow step key (01_OCR, 02_VALIDATE, etc.)
+    display_name TEXT,                    --human-readable activity name shown in UI
+    node_id TEXT,                         --ReactFlow node mapping key (static node reference)
+    prev_node_id TEXT,                    --previous node in execution chain (sequence tracking)
+    branch_id TEXT,                       --branch identifier for conditional flows
+    attempt INT DEFAULT 1,                --retry attempt count for this activity execution
+    workflow_type TEXT,                   --type of workflow (invoice, onboarding, etc.)
+    task_name TEXT,                       --internal task/worker function name
+    activity_type TEXT,                   --classification (system, human, integration)
+    activity_group TEXT,                  --grouping label for UI grouping/swimlanes
+    status TEXT,                          --current execution status (STARTED, COMPLETED, FAILED)
+    status_reason TEXT,                   --failure/skip reason or business decision explanation
+    input_data JSONB,                     --raw input payload sent to activity
+    output_data JSONB,                    --output/result returned by activity
+    input_context JSONB,                  --workflow context snapshot at execution time
+    start_time TIMESTAMP,                 --activity execution start timestamp
+    end_time TIMESTAMP,                   --activity execution end timestamp
+    duration_ms INT,                      --execution duration in milliseconds (UI optimization)
+    created_at TIMESTAMP DEFAULT NOW()   --record creation timestamp
 );
 
 
@@ -68,10 +80,10 @@ CREATE TABLE IF NOT EXISTS workflow_approval_task (
     -- Core workflow linkage
     workflow_id TEXT NOT NULL,
     workflow_type TEXT,
-    header_id BIGINT,                    -- Link to automation_process_header
-    item_id BIGINT,                    -- Link to automation_process_header_item (optional, for document-level tasks)
+    header_id BIGINT,    --Link to automation_process_header
+    item_id BIGINT,    --Link to automation_process_header_item (optional, for document-level tasks)
     -- Business context
-    reference_id TEXT,                    -- invoice_id / customer_id
+    reference_id TEXT,    --invoice_id / customer_id
     priority TEXT DEFAULT 'MEDIUM',
     
     -- Task identity
@@ -82,11 +94,11 @@ CREATE TABLE IF NOT EXISTS workflow_approval_task (
 
     -- Assignment
     assigned_role TEXT,
-    assigned_to TEXT,                     -- specific user (optional)
-    action_by TEXT,                       -- who completed the task
+    assigned_to TEXT,     --specific user (optional)
+    action_by TEXT,       --who completed the task
     -- State
-    status TEXT NOT NULL,                 -- PENDING, COMPLETED, REJECTED, etc.
-    decision TEXT,                        -- APPROVED / REJECTED / AUTO_APPROVED
+    status TEXT NOT NULL, --PENDING, COMPLETED, REJECTED, etc.
+    decision TEXT,        --APPROVED / REJECTED / AUTO_APPROVED
     status_reason TEXT,
 
     is_current BOOLEAN DEFAULT TRUE,      -- only 1 active 
@@ -158,7 +170,7 @@ CREATE TABLE IF NOT EXISTS automation_process_header (
     reference_id TEXT,               -- customer_id, invoice number, employee_id, etc.
     -- Domain-driven workflow-level metadata
     workflow_type TEXT,          -- e.g., Customer Onboarding, Invoice Processing, 
-    process_name TEXT,                     -- e.g., KYC, Billing, Payroll
+    process_name TEXT,     --e.g., KYC, Billing, Payroll
     process_group TEXT,              -- e.g., Sales, Finance, HR
 
     -- User-declared / structured data (source of truth for entire case)
@@ -186,11 +198,11 @@ CREATE TABLE IF NOT EXISTS automation_process_item (
     workflow_id TEXT,
 
     -- Document / line item details
-    document_id TEXT,                    -- document number, employee ID, etc.
-    declared_doc_type TEXT,                    -- passport, invoice, direct debit
-    doc_type TEXT,                    -- passport, invoice, direct debit
+    document_id TEXT,    --document number, employee ID, etc.
+    declared_doc_type TEXT,    --passport, invoice, direct debit
+    doc_type TEXT,    --passport, invoice, direct debit
     latest_ocr_document_id BIGINT,               -- link to workflow_ocr_data
-    document_url TEXT,                -- store S3/Blob URL of uploaded document
+    document_url TEXT,--store S3/Blob URL of uploaded document
     declared_data JSONB,              -- optional per-document declared info
     is_active BOOLEAN DEFAULT TRUE,   -- only 1 active per doc_type
 
