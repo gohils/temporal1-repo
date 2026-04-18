@@ -1,0 +1,19 @@
+run python script to create databse 
+        # =========================
+        # Create databases
+        # =========================
+        execute_sql(conn, "CREATE DATABASE temporal;")
+        execute_sql(conn, "CREATE DATABASE temporal_visibility;")
+
+
+Add extensions on Azure postgreSQL
+PostgreSQL → Server Parameters
+Check:
+azure.extensions
+Add:
+btree_gin, pg_trgm, btree_gist
+
+docker run --rm \
+  -v $(pwd)/scripts:/scripts \
+  temporalio/admin-tools:1.29 \
+  /scripts/setup-postgres.sh

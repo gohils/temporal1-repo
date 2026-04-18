@@ -1,0 +1,65 @@
+version: "3.8"
+
+services:
+  temporal:
+    image: temporalio/server:1.28
+    container_name: temporal
+
+    env_file:
+      - .env
+
+    environment:
+      DB: postgres12
+      DB_PORT: ${POSTGRES_PORT}
+
+      POSTGRES_SEEDS: ${POSTGRES_HOST}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD}
+
+      DBNAME: ${POSTGRES_DB}
+      VISIBILITY_DBNAME: ${POSTGRES_VISIBILITY_DB}
+
+      SQL_TLS_ENABLED: "true"
+      SQL_HOST_VERIFICATION: "true"
+      SQL_HOST_NAME: ${POSTGRES_HOST}
+
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/development.yaml
+
+    ports:
+      - "7233:7233"
+
+    volumes:
+      - ./config/dynamicconfig:/etc/temporal/config/dynamicconfig
+
+    restart: unless-stopped
+  temporal-admin-tools:
+    image: temporalio/admin-tools:1.28
+    container_name: temporal-admin-tools
+
+    env_file:
+      - .env
+
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+
+    depends_on:
+      - temporal
+
+    stdin_open: true
+    tty: true
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    container_name: temporal-ui
+
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+
+    depends_on:
+      - temporal
+
+    ports:
+      - "8080:8080"
+
+    restart: unless-stopped
