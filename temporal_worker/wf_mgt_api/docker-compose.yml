@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+
+  # -----------------------------
+  # FastAPI Management API
+  # -----------------------------
+  workflow_mgt_api:
+    env_file:
+      - .env
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wf-mgt-api
+
+    ports:
+      - "8000:8000"
+
+    restart: unless-stopped

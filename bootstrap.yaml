@@ -1,0 +1,28 @@
+#cloud-config
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - docker.io
+  - docker-compose
+  - python3-pip
+  - git
+
+runcmd:
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker azureuser
+
+  # install docker compose v2 (more reliable)
+  - mkdir -p /usr/libexec/docker/cli-plugins
+  - curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
+    -o /usr/libexec/docker/cli-plugins/docker-compose
+  - chmod +x /usr/libexec/docker/cli-plugins/docker-compose
+
+  # pre-pull images (huge speedup later)
+  - docker pull postgres:15 || true
+  - docker pull temporalio/auto-setup:latest || true
+
+  # mark ready
+  - echo "BOOTSTRAP COMPLETE" > /home/azureuser/READY

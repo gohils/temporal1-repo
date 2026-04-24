@@ -22,7 +22,7 @@ with workflow.unsafe.imports_passed_through():
         log_approval_signal
     )
 
-TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "host.docker.internal:7233")
+TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "20.213.111.57:7233")
 TEMPORAL_HOST = "localhost:7233"
 # TEMPORAL_HOST = "temporal-server-demo.australiaeast.cloudapp.azure.com:7233"
 

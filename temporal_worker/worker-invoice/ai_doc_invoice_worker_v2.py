@@ -1,5 +1,5 @@
 # -----------------------------
-# Invoice_processing_human_in_loop_workflow_KYC_style.py
+# ai_doc_invoice_worker_v2.py
 # -----------------------------
 
 import asyncio, json, uuid, os
@@ -24,10 +24,12 @@ with workflow.unsafe.imports_passed_through():
 # -----------------------------
 # Environment and Task Queue
 # -----------------------------
-TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
-# AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")
-AI_API_URL = "http://localhost:8000"  # Local testing override
-DEFAULT_TASK_QUEUE = "finance-invoice-queue"
+
+# TEMPORAL_HOST =  "localhost:7233"  
+TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "temporal-server-demo.australiaeast.cloudapp.azure.com:7233")
+# TASK_QUEUE = os.getenv("TASK_QUEUE", "finance-invoice-queue")
+TASK_QUEUE = "finance-invoice-queue"
+AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")
 
 # -----------------------------
 # Data Contracts
@@ -410,10 +412,16 @@ class InvoiceProcessingWorkflow:
 # -----------------------------
 async def main():
     # Start Temporal worker
+    print("\n🚀 STARTING TEMPORAL INVOICE WORKER")
+    print(f"Connecting to: {TEMPORAL_HOST}\n")
+
     client = await Client.connect(TEMPORAL_HOST)
+
+    print("✅ Connected to Temporal\n")
+
     worker = Worker(
         client,
-        task_queue=DEFAULT_TASK_QUEUE,
+        task_queue=TASK_QUEUE,
         workflows=[InvoiceProcessingWorkflow],
         activities=[
             pre_process_invoices,

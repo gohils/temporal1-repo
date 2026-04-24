@@ -19,7 +19,13 @@ from openai import OpenAI
 # ---------------------------
 # Environment Validation
 # ---------------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+def get_openai_key():
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    return key
+
+OPENAI_API_KEY = get_openai_key()
 AZURE_ENDPOINT = os.getenv("AZURE_DOC_INT_API_ENDPOINT")
 AZURE_API_KEY = os.getenv("AZURE_DOC_INT_API_KEY")
 
@@ -45,7 +51,7 @@ class AIClients:
     def llm(cls):
         if cls._llm_client is None:
             cls._llm_client = OpenAI(
-                api_key=os.getenv("OPENAI_API_KEY")
+                api_key=get_openai_key()
             )
         return cls._llm_client
 

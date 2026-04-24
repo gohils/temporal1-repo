@@ -33,6 +33,14 @@ ssh azureuser@temporal-server-demo.australiaeast.cloudapp.azure.com
 
 ssh -o StrictHostKeyChecking=no azureuser@temporal-server-demo.australiaeast.cloudapp.azure.com
 
+upload local folder - sftp
+scp -o StrictHostKeyChecking=no -r C:\myproject azureuser@temporal-server-demo.australiaeast.cloudapp.azure.com:/home/azureuser/
+
+git archive -o deploy.tar.gz HEAD
+scp -o StrictHostKeyChecking=no deploy.tar.gz azureuser@temporal-server-demo.australiaeast.cloudapp.azure.com:/home/azureuser/
+mkdir -p temporal-repo && tar -xzf deploy.tar.gz -C temporal-repo
+tar -xzf deploy.tar.gz
+
 # Install Docker + Compose
 sudo apt update
 sudo apt install -y docker.io docker-compose
@@ -41,12 +49,11 @@ sudo usermod -aG docker $USER
 newgrp docker
 
 git clone https://github.com/gohils/temporal1-repo.git
-cd temporal1-repo/server_temporal_linux
-
-docker-compose -f docker-compose-image-postgres up -d
+cd temporal1-repo/linux_v1
+docker-compose -f docker-compose-image-postgres.yml up -d
 
 cd ..
-cd temporal_pattern_app1
+cd temporal_worker
 docker-compose -f docker-compose-worker-pattern1.yml up -d
 fastapi endpoint -
 http://temporal-server-demo.australiaeast.cloudapp.azure.com:8000

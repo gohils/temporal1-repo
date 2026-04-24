@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  payment_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: payment-worker
+    env_file:
+      - .env
+    restart: unless-stopped

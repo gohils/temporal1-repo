@@ -36,6 +36,9 @@ services:
 
     restart: unless-stopped
 
+    networks:
+      - temporal-network
+
 
   temporal-ui:
     image: temporalio/ui:2.34.0
@@ -51,6 +54,9 @@ services:
       - temporal
 
     restart: unless-stopped
+
+    networks:
+      - temporal-network
 
 
   temporal-admin-tools:
@@ -68,3 +74,15 @@ services:
 
     stdin_open: true
     tty: true
+
+    networks:
+      - temporal-network
+
+
+# -----------------------------
+# NETWORK (ADDED ONLY PART)
+# -----------------------------
+networks:
+  temporal-network:
+    external: true
+    name: temporal-network

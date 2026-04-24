@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  invoice_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: invoice-worker
+    env_file:
+      - .env
+    restart: unless-stopped

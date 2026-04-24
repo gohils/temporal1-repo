@@ -2,11 +2,14 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
+import random
 from temporalio import workflow, activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
 TEMPORAL_HOST = "temporal-server-demo.australiaeast.cloudapp.azure.com:7233"
+TEMPORAL_HOST = "localhost:7233"
+
 # -----------------------------
 # Data Classes
 # -----------------------------
@@ -101,10 +104,8 @@ class CustomerOnboardingWorkflow:
 async def main():
     print("🚀 PROGRAM START")
 
-    print("🔵 Connecting to Temporal")
-    # client = await Client.connect("localhost:7233")
     client = await Client.connect(TEMPORAL_HOST)
-    print("✅ Temporal connected")
+    print("✅ Connected")
 
     worker = Worker(
         client,
@@ -113,20 +114,32 @@ async def main():
         activities=[validate_customer, create_crm, create_erp],
     )
 
-    async with worker:
-        print("🚀 Starting workflow execution")
-        customer = Customer(customer_id="CUST-102", name="Alice", email="alice@example.com")
+    # START worker FIRST
+    worker_task = asyncio.create_task(worker.run())
 
-        handle = await client.start_workflow(
-            CustomerOnboardingWorkflow.run,
-            customer,
-            id=f"onboarding-{customer.customer_id}",
-            task_queue="customer-onboarding-task-queue",
-        )
+    print("👷 Worker started")
 
-        result = await handle.result()
-        print("\n🎉 FINAL RESULT")
-        print(result)
+    # small delay to ensure polling is active
+    await asyncio.sleep(2)
+
+    customer = Customer(
+        customer_id=f"CUST-{random.randint(100, 999)}",
+        name="Alice",
+        email="alice@example.com"
+    )
+
+    handle = await client.start_workflow(
+        CustomerOnboardingWorkflow.run,
+        customer,
+        id=f"onboarding-{customer.customer_id}",
+        task_queue="customer-onboarding-task-queue",
+    )
+
+    result = await handle.result()
+    print("\n🎉 FINAL RESULT")
+    print(result)
+
+    worker_task.cancel()
 
 if __name__ == "__main__":
     asyncio.run(main())

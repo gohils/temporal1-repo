@@ -2,7 +2,8 @@
 
 ## 🧭 Architecture
 
--   Azure PostgreSQL Flexible Server
+-   Azure PostgreSQL Flexible Server in the Austrlia East (Compute size
+Standard_B2s (2 vCores, 4 GiB memory, 1280 max iops))
 -   Docker VM (Windows/Linux)
 -   Temporal Server (gRPC 7233)
 -   Temporal UI (8080)
@@ -11,7 +12,19 @@
 ------------------------------------------------------------------------
 
 ## 🪜 Step 1 --- Azure PostgreSQL Setup
+### provision azure postgreSQL and activate following extensions
+Add extensions btree_gin, pg_trgm, btree_gist on Azure postgreSQL
+PostgreSQL → Server Parameters
+Check: azure.extensions
+Add: btree_gin, pg_trgm, btree_gist
 
+``` bash
+az postgres flexible-server parameter set \
+  --resource-group 1-a-databases\
+  --server-name zdb1\
+  --name azure.extensions \
+  --value "btree_gin,pg_trgm,btree_gist"
+```
 ### Create databases
 
 ``` sql
@@ -21,7 +34,7 @@ CREATE DATABASE temporal_visibility;
 
 ### Run this python script to creat these two database
 ``` bash
-python temporal_linux_azure_db\scripts\create_temporal_databases.py 
+python server_temporal_linux_azure_db\scripts\create_temporal_databases.py 
 ```
 
 Add extensions on Azure postgreSQL
@@ -107,8 +120,19 @@ MSYS_NO_PATHCONV=1 docker run --rm -it \
 ``` bash
 docker-compose -f docker-compose-temporal-azure.yml up -d 
 ```
-
 ------------------------------------------------------------------------
+## 🪜 Step 8 --- One-time Namespace creation on temporal server (only once after deployment)
+
+Run for: - create namespace
+``` bash
+MSYS_NO_PATHCONV=1 docker run --rm -it \
+  --env-file .env \
+  --network temporal-network \
+  -v "$(pwd -W)/scripts:/scripts" \
+  --entrypoint /bin/sh \
+  temporalio/admin-tools:1.29 \
+  -x /scripts/create-namespace.sh
+```
 
 ## 🪜 Step 9 --- Verify
 

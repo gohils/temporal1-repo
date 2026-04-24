@@ -45,7 +45,7 @@ app.include_router(crud_router)
 app.include_router(ai_doc_router)
 app.include_router(ai_doc_llm_router)
 
-TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
+TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "20.213.111.57:7233")
 DEFAULT_TASK_QUEUE = os.getenv("TASK_QUEUE", "default-task-queue")
 
 """Lazy singleton Temporal client with retry safety."""

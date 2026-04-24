@@ -1,0 +1,4 @@
+requests
+uvicorn
+fastapi
+temporalio==1.6.0

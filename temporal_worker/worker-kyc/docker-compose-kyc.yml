@@ -1,0 +1,10 @@
+version: "3.9"
+services:
+  kyc_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kyc-worker
+    env_file:
+      - .env
+    restart: unless-stopped

@@ -1,130 +1,145 @@
-# 1httpx_wf_deco.py
 import asyncio
-from dataclasses import dataclass
+import uuid
 from datetime import timedelta
+from random import random
+
 from temporalio import workflow, activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
-# -----------------------------
-# Data Classes
-# -----------------------------
-@dataclass
-class Customer:
-    customer_id: str
-    name: str
-    email: str
-
-@dataclass
-class ValidateCustomerInput:
-    customer: Customer
-    workflow_id: str
-
-@dataclass
-class CreateCRMInput:
-    customer: Customer
-    workflow_id: str
-
-@dataclass
-class CreateERPInput:
-    customer: Customer
-    workflow_id: str
+# TEMPORAL_HOST =  "localhost:7233"
+TEMPORAL_HOST =  "temporal-server-demo.australiaeast.cloudapp.azure.com:7233"  # Update if Temporal server is running on a different host/port
 
 # -----------------------------
 # Activities
 # -----------------------------
 @activity.defn
-async def validate_customer(input: ValidateCustomerInput):
-    import httpx
-    print("🟡 Activity START: validate_customer")
-    async with httpx.AsyncClient() as client:
-        resp = await client.get("https://jsonplaceholder.typicode.com/posts/1", timeout=10)
-        return resp.json()
+async def validate(payload: dict) -> dict:
+    print(f"[ACTIVITY] validate -> payload: {payload}")
+
+    if payload["amount"] <= 0:
+        print("[ACTIVITY] validate -> FAILED")
+        return {"approved": False, "reason": "Invalid amount"}
+
+    print("[ACTIVITY] validate -> APPROVED")
+    return {"approved": True}
 
 
 @activity.defn
-async def create_crm(input: CreateCRMInput):
-    import httpx
-    print("🟡 Activity START: create_crm")
-    async with httpx.AsyncClient() as client:
-        resp = await client.post("https://jsonplaceholder.typicode.com/posts", json=input.customer.__dict__, timeout=10)
-        return resp.json()
+async def charge(payload: dict) -> dict:
+    print(f"[ACTIVITY] charge -> payload: {payload}")
+
+    await asyncio.sleep(1)
+
+    result = {
+        "transaction_id": str(uuid.uuid4()),
+        "email": f"{payload['customer_id']}@test.com",
+    }
+
+    print(f"[ACTIVITY] charge -> success: {result}")
+    return result
 
 
 @activity.defn
-async def create_erp(input: CreateERPInput):
-    import httpx
-    print("🟡 Activity START: create_erp")
-    payload = {"customer_id": input.customer.customer_id, "billing_profile": "STANDARD"}
-    async with httpx.AsyncClient() as client:
-        resp = await client.post("https://jsonplaceholder.typicode.com/posts", json=payload, timeout=10)
-        return resp.json()
+async def send_receipt(payload: dict):
+    print(f"[ACTIVITY] send_receipt -> payload: {payload}")
+
+    await asyncio.sleep(0.5)
+
+    print("[ACTIVITY] send_receipt -> email sent")
+
 
 # -----------------------------
 # Workflow
 # -----------------------------
 @workflow.defn
-class CustomerOnboardingWorkflow:
+class PaymentWorkflow:
     @workflow.run
-    async def run(self, customer: Customer):
-        workflow_id = f"onboarding-{customer.customer_id}"
-        print("🔷 WORKFLOW START")
+    async def run(self, data: dict):
 
-        validation_result = await workflow.execute_activity(
-            validate_customer,
-            ValidateCustomerInput(customer, workflow_id),
-            start_to_close_timeout=timedelta(seconds=30)
+        print(f"[WORKFLOW] START -> {data}")
+
+        # Step 1: Validate
+        print("[WORKFLOW] Step 1 -> validate")
+        res = await workflow.execute_activity(
+            validate,
+            data,
+            start_to_close_timeout=timedelta(seconds=10),
         )
 
-        crm_result = await workflow.execute_activity(
-            create_crm,
-            CreateCRMInput(customer, workflow_id),
-            start_to_close_timeout=timedelta(seconds=30)
+        print(f"[WORKFLOW] validate result -> {res}")
+
+        if not res["approved"]:
+            print("[WORKFLOW] DECLINED")
+            return {"status": "DECLINED"}
+
+        # Step 2: Charge
+        print("[WORKFLOW] Step 2 -> charge")
+
+        charge_res = await workflow.execute_activity(
+            charge,
+            data,
+            start_to_close_timeout=timedelta(seconds=30),
         )
 
-        erp_result = await workflow.execute_activity(
-            create_erp,
-            CreateERPInput(customer, workflow_id),
-            start_to_close_timeout=timedelta(seconds=30)
+        print(f"[WORKFLOW] charge result -> {charge_res}")
+
+        # Step 3: Receipt
+        print("[WORKFLOW] Step 3 -> send receipt")
+
+        await workflow.execute_activity(
+            send_receipt,
+            {**data, "email": charge_res["email"]},
+            start_to_close_timeout=timedelta(seconds=10),
         )
+
+        print("[WORKFLOW] SUCCESS COMPLETE")
 
         return {
-            "validation": validation_result,
-            "crm": crm_result,
-            "erp": erp_result
+            "status": "SUCCESS",
+            "tx": charge_res["transaction_id"],
         }
 
+
 # -----------------------------
-# Main Execution
+# Main
 # -----------------------------
 async def main():
-    print("🚀 PROGRAM START")
+    print("🚀 STARTING WORKER")
 
-    print("🔵 Connecting to Temporal")
-    client = await Client.connect("localhost:7233")
-    print("✅ Temporal connected")
+    client = await Client.connect(TEMPORAL_HOST)
+    print("✅ Connected to Temporal")
 
     worker = Worker(
         client,
-        task_queue="customer-onboarding-task-queue",
-        workflows=[CustomerOnboardingWorkflow],
-        activities=[validate_customer, create_crm, create_erp],
+        task_queue="payments",
+        workflows=[PaymentWorkflow],
+        activities=[validate, charge, send_receipt],
     )
 
     async with worker:
-        print("🚀 Starting workflow execution")
-        customer = Customer(customer_id="CUST-102", name="Alice", email="alice@example.com")
+        print("🟢 Worker running")
+
+        payload = {
+            "payment_id": str(uuid.uuid4()),
+            "customer_id": f"cust-{int(random()*1000)}",
+            "amount": round(random() * 1000, 2),
+        }
+
+        print(f"🚀 Starting workflow -> {payload}")
 
         handle = await client.start_workflow(
-            CustomerOnboardingWorkflow.run,
-            customer,
-            id=f"onboarding-{customer.customer_id}",
-            task_queue="customer-onboarding-task-queue",
+            PaymentWorkflow,
+            payload,
+            id=f"payment-{payload['payment_id']}",
+            task_queue="payments",
         )
 
         result = await handle.result()
+
         print("\n🎉 FINAL RESULT")
         print(result)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

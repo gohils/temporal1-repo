@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+
+  # -----------------------------
+  # FastAPI Management API
+  # -----------------------------
+  workflow_mgt_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wf-mgt-api
+
+    environment:
+      TEMPORAL_HOST: "20.213.149.157:7233"
+      POSTGRES_CONNECTION_STRING: "postgresql://postgres.sceeibvfwcdhooljytsq:Zsupabase~1@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres"
+      TASK_QUEUE: "default-task-queue"
+
+    ports:
+      - "8000:8000"
+
+    restart: unless-stopped
