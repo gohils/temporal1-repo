@@ -27,8 +27,7 @@ with workflow.unsafe.imports_passed_through():
 
 # TEMPORAL_HOST =  "localhost:7233"  
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "temporal-server-demo.australiaeast.cloudapp.azure.com:7233")
-# TASK_QUEUE = os.getenv("TASK_QUEUE", "finance-invoice-queue")
-TASK_QUEUE = "finance-invoice-queue"
+TASK_QUEUE = os.getenv("TASK_QUEUE", "finance-invoice-queue")
 AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")
 
 # -----------------------------

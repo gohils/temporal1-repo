@@ -8,9 +8,7 @@ from pydantic import BaseModel
 from temporalio.client import Client, WorkflowHandle
 
 
-TEMPORAL_HOST = "temporal-server-demo.australiaeast.cloudapp.azure.com:7233"
-# TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
-
+TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "temporal-server-demo.australiaeast.cloudapp.azure.com:7233")
 DEFAULT_TASK_QUEUE = os.getenv("TASK_QUEUE", "default-task-queue")
 
 # -------------------------------

@@ -25,7 +25,7 @@ with workflow.unsafe.imports_passed_through():
 
 # Environment configs
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "temporal-server-demo.australiaeast.cloudapp.azure.com:7233")
-TASK_QUEUE = "kyc-onboarding-queue"
+TASK_QUEUE = os.getenv("TASK_QUEUE", "kyc-onboarding-queue")
 AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")  # AI endpoint
 
 # -----------------------------

@@ -24,10 +24,9 @@ with workflow.unsafe.imports_passed_through():
     )
 
 # Environment configs
-TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")  # Temporal server host
-TASK_QUEUE = "kyc-onboarding-queue"  # Task queue
-# AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")  # AI endpoint
-AI_API_URL = "http://localhost:8000" 
+TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "temporal-server-demo.australiaeast.cloudapp.azure.com:7233")
+TASK_QUEUE = os.getenv("TASK_QUEUE", "kyc-onboarding-queue")
+AI_API_URL = os.getenv("AI_API_URL", "https://zdoc-ai-api.azurewebsites.net")  # AI endpoint
 
 # -----------------------------
 # Approval logging helper
@@ -488,7 +487,12 @@ class CustomerOnboardingWorkflow:
 # Worker
 # -----------------------------
 async def main():
-    client = await Client.connect(TEMPORAL_HOST)  # connect to Temporal
+    print("\n🚀 STARTING TEMPORAL KYC WORKER")
+    print(f"Connecting to: {TEMPORAL_HOST}\n")
+
+    client = await Client.connect(TEMPORAL_HOST)
+
+    print("✅ Connected to Temporal\n")
 
     worker = Worker(
         client,
