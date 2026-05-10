@@ -36,15 +36,10 @@ ssh -o StrictHostKeyChecking=no azureuser@temporal-server-demo.australiaeast.clo
 upload local folder - sftp
 scp -o StrictHostKeyChecking=no -r C:\myproject azureuser@temporal-server-demo.australiaeast.cloudapp.azure.com:/home/azureuser/
 
-git archive -o deploy.tar.gz HEAD
-scp -o StrictHostKeyChecking=no deploy.tar.gz azureuser@temporal-server-demo.australiaeast.cloudapp.azure.com:/home/azureuser/
-mkdir -p temporal-repo && tar -xzf deploy.tar.gz -C temporal-repo
-tar -xzf deploy.tar.gz
-
 # Install Docker + Compose
-sudo apt update
-sudo apt install -y docker.io docker-compose
-sudo apt install python3-pip
+export DEBIAN_FRONTEND=noninteractive
+sudo apt-get update -y
+sudo apt-get install -y  docker.io  docker-compose  python3-pip
 sudo usermod -aG docker $USER
 newgrp docker
 
