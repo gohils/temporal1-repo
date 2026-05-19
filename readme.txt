@@ -25,6 +25,16 @@ az vm create \
   --ssh-key-values ~/.ssh/id_rsa.pub \
   --public-ip-address-dns-name temporal-server-demo
 
+# Create on-demand VM
+az vm create \
+  --resource-group 1-ai-llm-rg \
+  --name temporal-server-vm \
+  --image Ubuntu2204 \
+  --size Standard_D2as_v5 \
+  --admin-username azureuser \
+  --ssh-key-values ~/.ssh/id_rsa.pub \
+  --public-ip-address-dns-name temporal-server-demo
+
 # Open ports for demo only
 az vm open-port --resource-group 1-ai-llm-rg --name temporal-server-vm --port "*"
 
